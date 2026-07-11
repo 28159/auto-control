@@ -260,9 +260,20 @@ namespace WeChatAutomation.Core.Recording
                 ActionType = type,
                 Name = name,
                 Parameter = parameter,
+                ParameterName = type == ActionType.InputParam ? parameter : null,
                 DelayMs = delay
             };
 
+            _nodes.Add(node);
+            OnLog($"手动添加 #{node.Order}: {node.Summary}");
+            NodeRecorded?.Invoke(this, node);
+        }
+
+        public void AddManual(RecordedAction node)
+        {
+            if (_isRecording) FlushTextBuffer();
+
+            node.Order = _nodes.Count + 1;
             _nodes.Add(node);
             OnLog($"手动添加 #{node.Order}: {node.Summary}");
             NodeRecorded?.Invoke(this, node);

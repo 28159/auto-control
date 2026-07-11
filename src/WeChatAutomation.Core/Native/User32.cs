@@ -229,6 +229,12 @@ namespace WeChatAutomation.Core.Native
         [DllImport("user32.dll")]
         public static extern IntPtr GetForegroundWindow();
 
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+        public const uint GA_ROOT = 2;
+        public const uint GA_ROOTOWNER = 3;
+
         #endregion
 
         #region 全局键盘钩子

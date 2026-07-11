@@ -87,12 +87,16 @@ namespace WeChatAutomation.Core.Native
                 {
                     var info = new MouseClickInfo { X = capturedX, Y = capturedY, WindowHandle = capturedHwnd };
 
-                    // 获取窗口标题
-                    int titleLen = User32.GetWindowTextLength(capturedHwnd);
+                    // 获取顶层窗口句柄（Chrome 等应用有子窗口）
+                    IntPtr topLevelHwnd = User32.GetAncestor(capturedHwnd, User32.GA_ROOT);
+                    if (topLevelHwnd == IntPtr.Zero) topLevelHwnd = capturedHwnd;
+
+                    // 获取顶层窗口标题
+                    int titleLen = User32.GetWindowTextLength(topLevelHwnd);
                     if (titleLen > 0)
                     {
                         var sb = new System.Text.StringBuilder(titleLen + 1);
-                        User32.GetWindowText(capturedHwnd, sb, sb.Capacity);
+                        User32.GetWindowText(topLevelHwnd, sb, sb.Capacity);
                         info.WindowTitle = sb.ToString();
                     }
 
@@ -105,6 +109,17 @@ namespace WeChatAutomation.Core.Native
                             info.ElementName = element.Current.Name;
                             info.AutomationId = element.Current.AutomationId;
                             info.ControlType = element.Current.ControlType?.ProgrammaticName?.Replace("ControlType.", "") ?? "";
+
+                            // 尝试获取元素所在的顶层窗口名称
+                            if (string.IsNullOrEmpty(info.WindowTitle))
+                            {
+                                var parentWindow = element.FindFirst(TreeScope.Ancestors,
+                                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window));
+                                if (parentWindow != null)
+                                {
+                                    info.WindowTitle = parentWindow.Current.Name;
+                                }
+                            }
                         }
                     }
                     catch (Exception ex) { _logger.Warn("MouseHook", $"UIA 元素捕获失败: {ex.Message}"); }

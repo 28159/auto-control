@@ -1,0 +1,5 @@
+﻿/src/WeChatAutomation.Core/bin/*
+/src/WeChatAutomation.Core/obj/*
+/src/WeChatAutomation.App/obj/*
+/src/WeChatAutomation.App/bin/*
+/.idea/*

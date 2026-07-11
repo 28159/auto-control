@@ -118,6 +118,11 @@ namespace WeChatAutomation.Core.Recording
                     OnLog($"滚动 {node.ScrollAmount} 行");
                     break;
 
+                case ActionType.InputParam:
+                    // 参数步骤 - 只是标记，实际替换由 ScriptExecutor 处理
+                    OnLog($"参数 [{node.ParameterName}]: {Trunc(node.Parameter, 20)}");
+                    break;
+
                 default:
                     OnLog($"未知操作类型: {node.ActionType}");
                     break;
@@ -241,7 +246,13 @@ namespace WeChatAutomation.Core.Recording
         /// </summary>
         private IntPtr FindTargetWindow(string? windowTitle)
         {
-            if (string.IsNullOrEmpty(windowTitle)) return IntPtr.Zero;
+            // 如果窗口标题为空，返回前台窗口
+            if (string.IsNullOrEmpty(windowTitle))
+            {
+                IntPtr fg = User32.GetForegroundWindow();
+                OnLog($"窗口标题为空，使用前台窗口: {fg}");
+                return fg;
+            }
 
             IntPtr found = IntPtr.Zero;
             // 保持回调委托引用，防止 GC 回收
@@ -252,11 +263,46 @@ namespace WeChatAutomation.Core.Recording
                 if (len == 0) return true;
                 var sb = new System.Text.StringBuilder(len + 1);
                 User32.GetWindowText(hwnd, sb, sb.Capacity);
-                if (sb.ToString().Contains(windowTitle, StringComparison.OrdinalIgnoreCase))
+                var title = sb.ToString();
+                if (title.Contains(windowTitle, StringComparison.OrdinalIgnoreCase))
                 {
                     found = hwnd;
                     return false;
                 }
+                return true;
+            };
+            User32.EnumWindows(callback, IntPtr.Zero);
+
+            // 如果精确匹配失败，尝试匹配进程名
+            if (found == IntPtr.Zero)
+            {
+                OnLog($"未找到窗口 \"{windowTitle}\"，尝试按进程名搜索");
+                found = FindWindowByProcessName(windowTitle);
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// 通过进程名查找窗口
+        /// </summary>
+        private IntPtr FindWindowByProcessName(string name)
+        {
+            IntPtr found = IntPtr.Zero;
+            User32.EnumWindowsProc callback = (hwnd, _) =>
+            {
+                if (!User32.IsWindowVisible(hwnd)) return true;
+                User32.GetWindowThreadProcessId(hwnd, out int pid);
+                try
+                {
+                    var proc = System.Diagnostics.Process.GetProcessById(pid);
+                    if (proc.ProcessName.Contains(name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = hwnd;
+                        return false;
+                    }
+                }
+                catch { }
                 return true;
             };
             User32.EnumWindows(callback, IntPtr.Zero);

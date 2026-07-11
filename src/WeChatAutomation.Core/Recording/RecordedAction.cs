@@ -19,7 +19,8 @@ namespace WeChatAutomation.Core.Recording
         WaitForApp,
         Scroll,
         ReadContent,
-        ScrollRead
+        ScrollRead,
+        InputParam
     }
 
     /// <summary>
@@ -46,6 +47,11 @@ namespace WeChatAutomation.Core.Recording
         public int DelayMs { get; set; } = 300;
         public int ScrollAmount { get; set; } = 3; // 滚动行数
 
+        // 动态输入参数
+        public string? ParameterName { get; set; } // 参数名称，用于 {参数名} 占位符
+        public string? DefaultValue { get; set; } // 默认值
+        public bool IsRequired { get; set; } = true; // 是否必填
+
         // 元数据
         public bool IsEnabled { get; set; } = true;
         public DateTime CreatedAt { get; set; } = DateTime.Now;
@@ -65,6 +71,7 @@ namespace WeChatAutomation.Core.Recording
             ActionType.Scroll => $"滚动 {ScrollAmount} 行",
             ActionType.ReadContent => "阅读窗口内容",
             ActionType.ScrollRead => $"滚动阅读 {ScrollAmount} 行",
+            ActionType.InputParam => $"输入参数 [{ParameterName ?? "未命名"}]",
             _ => ActionType.ToString()
         };
 
@@ -94,6 +101,29 @@ namespace WeChatAutomation.Core.Recording
         public DateTime CreatedAt { get; set; } = DateTime.Now;
         public List<RecordedAction> Actions { get; set; } = new();
         public List<ReadContentResult> ReadResults { get; set; } = new();
+        public List<ScriptParameter> Parameters { get; set; } = new();
+    }
+
+    /// <summary>
+    /// 脚本参数定义
+    /// </summary>
+    public class ScriptParameter
+    {
+        public string Name { get; set; } = "";
+        public string DisplayName { get; set; } = "";
+        public string DefaultValue { get; set; } = "";
+        public string Description { get; set; } = "";
+        public bool IsRequired { get; set; } = true;
+        public ParameterType Type { get; set; } = ParameterType.Text;
+    }
+
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public enum ParameterType
+    {
+        Text,
+        Number,
+        Password,
+        MultiLine
     }
 
     public class ReadContentResult

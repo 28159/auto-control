@@ -62,6 +62,9 @@ namespace WeChatAutomation.App
 
             LoadScriptsList();
             AppendLog("F9录制 F10确认 F11回放 | 双击步骤可编辑");
+
+            // 初始化服务状态显示
+            Dispatcher.BeginInvoke(() => UpdateServiceStatus(), System.Windows.Threading.DispatcherPriority.Background);
         }
 
         // ═══ 快捷键 ═══
@@ -220,6 +223,13 @@ namespace WeChatAutomation.App
 
         private void ShowEditDialog(RecordedAction node)
         {
+            // 如果是 InputParam 类型，使用专门的参数编辑对话框
+            if (node.ActionType == ActionType.InputParam)
+            {
+                ShowEditInputParamDialog(node);
+                return;
+            }
+
             var w = new Window
             {
                 Title = $"编辑步骤 #{node.Order}",
@@ -291,6 +301,30 @@ namespace WeChatAutomation.App
             }
         }
 
+        private void ShowEditInputParamDialog(RecordedAction node)
+        {
+            var param = new ScriptParameter
+            {
+                Name = node.ParameterName ?? "",
+                DisplayName = node.Name?.Replace("参数: ", "") ?? "",
+                DefaultValue = node.DefaultValue ?? "",
+                IsRequired = node.IsRequired,
+                Type = ParameterType.Text
+            };
+
+            var edited = ShowAddParamDialog(param);
+            if (edited != null)
+            {
+                node.ParameterName = edited.Name;
+                node.Name = $"参数: {edited.DisplayName ?? edited.Name}";
+                node.DefaultValue = edited.DefaultValue;
+                node.IsRequired = edited.IsRequired;
+                node.Parameter = $"{{{edited.Name}}}";
+                RefreshGrid();
+                AppendLog($"编辑参数步骤: {edited.Name}");
+            }
+        }
+
         private void Delete_Click(object s, RoutedEventArgs e)
         {
             if (StepsGrid.SelectedItem is RecordedAction n)
@@ -315,7 +349,7 @@ namespace WeChatAutomation.App
         }
 
         // ═══ 回放 ═══
-        private async void PlayBtn_Click(object s, RoutedEventArgs e) => await PlayAll();
+        private async void PlayBtn_Click(object s, RoutedEventArgs e) => await PlayAllWithParams();
         private void StopPlayBtn_Click(object s, RoutedEventArgs e) => _player.Stop();
         private async System.Threading.Tasks.Task PlayAll()
         {
@@ -450,9 +484,28 @@ namespace WeChatAutomation.App
         private void SaveBtn_Click(object s, RoutedEventArgs e)
         {
             if (_steps.Count == 0) { MessageBox.Show("没有步骤可保存"); return; }
+
+            // 获取现有参数（如果有）
+            List<ScriptParameter> existingParams = null;
             if (_currentScript != null)
             {
-                var rec = new RecordingFile { Name = _currentScript.Name, CreatedAt = DateTime.Now, Actions = _steps.ToList() };
+                try
+                {
+                    var existingRec = ActionRecorder.LoadFromFile(_currentScript.FilePath);
+                    existingParams = existingRec.Parameters;
+                }
+                catch { }
+            }
+
+            if (_currentScript != null)
+            {
+                var rec = new RecordingFile
+                {
+                    Name = _currentScript.Name,
+                    CreatedAt = DateTime.Now,
+                    Actions = _steps.ToList(),
+                    Parameters = existingParams ?? new List<ScriptParameter>()
+                };
                 var opt = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
                 File.WriteAllText(_currentScript.FilePath, System.Text.Json.JsonSerializer.Serialize(rec, opt));
                 AppendLog($"已保存: {_currentScript.Name}"); LoadScriptsList();
@@ -463,7 +516,13 @@ namespace WeChatAutomation.App
                 if (string.IsNullOrWhiteSpace(name)) return;
                 if (!IsValidScriptName(name)) { MessageBox.Show("名称包含非法字符"); return; }
                 var path = Path.Combine(_scriptsDir, $"{name}.json");
-                var rec = new RecordingFile { Name = name, CreatedAt = DateTime.Now, Actions = _steps.ToList() };
+                var rec = new RecordingFile
+                {
+                    Name = name,
+                    CreatedAt = DateTime.Now,
+                    Actions = _steps.ToList(),
+                    Parameters = existingParams ?? new List<ScriptParameter>()
+                };
                 var opt = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
                 File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(rec, opt));
                 LoadScriptsList(); _currentScript = _scripts.FirstOrDefault(x => x.Name == name); CurrentScriptText.Text = name;
@@ -542,6 +601,618 @@ namespace WeChatAutomation.App
         }
 
         protected override void OnClosed(EventArgs e) { _recorder?.Dispose(); _player?.Dispose(); _hotkeyHook?.Dispose(); base.OnClosed(e); }
+
+        // ═══ 服务状态 ═══
+        private void RefreshStatus_Click(object s, RoutedEventArgs e) => UpdateServiceStatus();
+
+        private void UpdateServiceStatus()
+        {
+            try
+            {
+                // HTTP 状态
+                if (App.HttpApi?.IsRunning == true)
+                {
+                    HttpStatusDot.Fill = new SolidColorBrush(Color.FromRgb(76, 175, 80)); // 绿色
+                    HttpPortText.Text = $":{App.HttpApi.Port}";
+                    HttpToggleBtn.Content = "关闭";
+                    HttpToggleBtn.Background = new SolidColorBrush(Color.FromRgb(229, 57, 53)); // 红色
+                    HttpToggleBtn.Foreground = Brushes.White;
+                }
+                else
+                {
+                    HttpStatusDot.Fill = new SolidColorBrush(Color.FromRgb(204, 204, 204)); // 灰色
+                    HttpPortText.Text = "(未启动)";
+                    HttpToggleBtn.Content = "开启";
+                    HttpToggleBtn.Background = new SolidColorBrush(Color.FromRgb(76, 175, 80)); // 绿色
+                    HttpToggleBtn.Foreground = Brushes.White;
+                }
+
+                // MQTT 状态
+                if (App.Mqtt?.IsConnected == true)
+                {
+                    MqttStatusDot.Fill = new SolidColorBrush(Color.FromRgb(76, 175, 80)); // 绿色
+                    MqttStatusText.Text = $":{App.Mqtt.BrokerPort}";
+                    MqttToggleBtn.Content = "关闭";
+                    MqttToggleBtn.Background = new SolidColorBrush(Color.FromRgb(229, 57, 53)); // 红色
+                    MqttToggleBtn.Foreground = Brushes.White;
+                }
+                else
+                {
+                    MqttStatusDot.Fill = new SolidColorBrush(Color.FromRgb(204, 204, 204)); // 灰色
+                    MqttStatusText.Text = "(未连接)";
+                    MqttToggleBtn.Content = "开启";
+                    MqttToggleBtn.Background = new SolidColorBrush(Color.FromRgb(76, 175, 80)); // 绿色
+                    MqttToggleBtn.Foreground = Brushes.White;
+                }
+
+                // MCP 状态
+                if (App.Mcp != null)
+                {
+                    McpStatusDot.Fill = new SolidColorBrush(Color.FromRgb(76, 175, 80)); // 绿色
+                    McpToggleBtn.Content = "关闭";
+                    McpToggleBtn.Background = new SolidColorBrush(Color.FromRgb(229, 57, 53)); // 红色
+                    McpToggleBtn.Foreground = Brushes.White;
+                }
+                else
+                {
+                    McpStatusDot.Fill = new SolidColorBrush(Color.FromRgb(204, 204, 204)); // 灰色
+                    McpToggleBtn.Content = "开启";
+                    McpToggleBtn.Background = new SolidColorBrush(Color.FromRgb(76, 175, 80)); // 绿色
+                    McpToggleBtn.Foreground = Brushes.White;
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"更新服务状态失败: {ex.Message}");
+            }
+        }
+
+        private async void HttpToggle_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                if (App.HttpApi?.IsRunning == true)
+                {
+                    await App.HttpApi.StopAsync(CancellationToken.None);
+                    AppendLog("HTTP API 已关闭");
+                }
+                else
+                {
+                    await App.HttpApi.StartAsync(CancellationToken.None);
+                    AppendLog("HTTP API 已开启");
+                }
+                UpdateServiceStatus();
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"HTTP API 切换失败: {ex.Message}");
+            }
+        }
+
+        private async void MqttToggle_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                if (App.Mqtt?.IsConnected == true)
+                {
+                    await App.Mqtt.StopAsync(CancellationToken.None);
+                    AppendLog("MQTT 服务已关闭");
+                }
+                else
+                {
+                    await App.Mqtt.StartAsync(CancellationToken.None);
+                    AppendLog("MQTT 服务已开启");
+                }
+                UpdateServiceStatus();
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"MQTT 服务切换失败: {ex.Message}");
+            }
+        }
+
+        private void McpToggle_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                if (App.Mcp != null)
+                {
+                    App.Mcp.StopAsync(CancellationToken.None).Wait();
+                    App.Mcp.Dispose();
+                    AppendLog("MCP Server 已关闭");
+                }
+                else
+                {
+                    var config = App.Configuration;
+                    App.Mcp = new WeChatAutomation.Core.Services.McpServerService(App.ScriptExecutor, config);
+                    App.Mcp.StartAsync(CancellationToken.None);
+                    AppendLog("MCP Server 已开启");
+                }
+                UpdateServiceStatus();
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"MCP Server 切换失败: {ex.Message}");
+            }
+        }
+
+        // ═══ 动态参数管理 ═══
+        private void AddInputParam_Click(object s, RoutedEventArgs e)
+        {
+            var param = ShowAddParamDialog();
+            if (param != null)
+            {
+                var node = new RecordedAction
+                {
+                    Order = _steps.Count + 1,
+                    ActionType = ActionType.InputParam,
+                    Name = $"参数: {param.DisplayName ?? param.Name}",
+                    ParameterName = param.Name,
+                    DefaultValue = param.DefaultValue,
+                    IsRequired = param.IsRequired,
+                    Parameter = $"{{{param.Name}}}"
+                };
+                _recorder.AddManual(node);
+                RefreshGrid();
+                PlayBtn.IsEnabled = _steps.Count > 0;
+                AppendLog($"已添加参数步骤: {param.Name}");
+            }
+        }
+
+        private ScriptParameter ShowAddParamDialog(ScriptParameter existing = null)
+        {
+            var w = new Window
+            {
+                Title = existing != null ? "编辑参数" : "添加输入参数",
+                Width = 400,
+                Height = 350,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                ResizeMode = ResizeMode.NoResize
+            };
+
+            var sp = new StackPanel { Margin = new Thickness(15) };
+
+            // 参数名称
+            sp.Children.Add(new TextBlock { Text = "参数名称 (英文，用于占位符):", Margin = new Thickness(0, 0, 0, 3) });
+            var nameBox = new TextBox { Text = existing?.Name ?? "", Margin = new Thickness(0, 0, 0, 8), ToolTip = "如: message, username" };
+            sp.Children.Add(nameBox);
+
+            // 显示名称
+            sp.Children.Add(new TextBlock { Text = "显示名称:", Margin = new Thickness(0, 0, 0, 3) });
+            var displayNameBox = new TextBox { Text = existing?.DisplayName ?? "", Margin = new Thickness(0, 0, 0, 8) };
+            sp.Children.Add(displayNameBox);
+
+            // 参数类型
+            sp.Children.Add(new TextBlock { Text = "参数类型:", Margin = new Thickness(0, 0, 0, 3) });
+            var typeCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8) };
+            typeCombo.Items.Add("Text - 文本");
+            typeCombo.Items.Add("Number - 数字");
+            typeCombo.Items.Add("Password - 密码");
+            typeCombo.Items.Add("MultiLine - 多行文本");
+            typeCombo.SelectedIndex = existing?.Type switch
+            {
+                ParameterType.Number => 1,
+                ParameterType.Password => 2,
+                ParameterType.MultiLine => 3,
+                _ => 0
+            };
+            sp.Children.Add(typeCombo);
+
+            // 默认值
+            sp.Children.Add(new TextBlock { Text = "默认值:", Margin = new Thickness(0, 0, 0, 3) });
+            var defaultBox = new TextBox { Text = existing?.DefaultValue ?? "", Margin = new Thickness(0, 0, 0, 8) };
+            sp.Children.Add(defaultBox);
+
+            // 必填
+            var requiredBox = new CheckBox { Content = "必填", IsChecked = existing?.IsRequired ?? true, Margin = new Thickness(0, 0, 0, 8) };
+            sp.Children.Add(requiredBox);
+
+            // 说明
+            sp.Children.Add(new TextBlock { Text = "说明:", Margin = new Thickness(0, 0, 0, 3) });
+            var descBox = new TextBox { Text = existing?.Description ?? "", Margin = new Thickness(0, 0, 0, 8) };
+            sp.Children.Add(descBox);
+
+            // 使用示例
+            sp.Children.Add(new TextBlock
+            {
+                Text = "提示: 在步骤参数中使用 {参数名} 作为占位符",
+                Foreground = Brushes.Gray,
+                FontSize = 10,
+                Margin = new Thickness(0, 0, 0, 5)
+            });
+
+            // 按钮
+            var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            var ok = new Button { Content = "确定", IsDefault = true, Padding = new Thickness(15, 5, 15, 5), FontWeight = FontWeights.Bold };
+            var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(8, 0, 0, 0) };
+            bp.Children.Add(ok);
+            bp.Children.Add(cancel);
+            sp.Children.Add(bp);
+
+            w.Content = sp;
+
+            ScriptParameter result = null;
+            ok.Click += (_, _) =>
+            {
+                if (string.IsNullOrWhiteSpace(nameBox.Text))
+                {
+                    MessageBox.Show("请输入参数名称");
+                    return;
+                }
+
+                // 验证参数名称只包含英文、数字、下划线
+                var paramName = nameBox.Text.Trim();
+                if (!System.Text.RegularExpressions.Regex.IsMatch(paramName, @"^[a-zA-Z_][a-zA-Z0-9_]*$"))
+                {
+                    MessageBox.Show("参数名称只能包含英文字母、数字和下划线，且不能以数字开头");
+                    return;
+                }
+
+                var typeStr = typeCombo.SelectedItem?.ToString() ?? "Text - 文本";
+                var paramType = typeStr switch
+                {
+                    var s when s.StartsWith("Number") => ParameterType.Number,
+                    var s when s.StartsWith("Password") => ParameterType.Password,
+                    var s when s.StartsWith("MultiLine") => ParameterType.MultiLine,
+                    _ => ParameterType.Text
+                };
+
+                result = new ScriptParameter
+                {
+                    Name = paramName,
+                    DisplayName = displayNameBox.Text.Trim(),
+                    DefaultValue = defaultBox.Text,
+                    IsRequired = requiredBox.IsChecked == true,
+                    Description = descBox.Text,
+                    Type = paramType
+                };
+                w.DialogResult = true;
+            };
+
+            w.ShowDialog();
+            return result;
+        }
+
+        private void ManageParams_Click(object s, RoutedEventArgs e)
+        {
+            if (_currentScript == null)
+            {
+                MessageBox.Show("请先选择或保存脚本");
+                return;
+            }
+
+            try
+            {
+                var rec = ActionRecorder.LoadFromFile(_currentScript.FilePath);
+                ShowManageParamsDialog(rec);
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"加载脚本参数失败: {ex.Message}");
+            }
+        }
+
+        private void ShowManageParamsDialog(RecordingFile recording)
+        {
+            var w = new Window
+            {
+                Title = $"管理参数 - {recording.Name}",
+                Width = 550,
+                Height = 450,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this
+            };
+
+            var mainSp = new StackPanel { Margin = new Thickness(10) };
+
+            // 说明
+            mainSp.Children.Add(new TextBlock
+            {
+                Text = "在脚本步骤中使用 {参数名} 作为占位符，执行时会自动替换",
+                Foreground = Brushes.Gray,
+                FontSize = 11,
+                Margin = new Thickness(0, 0, 0, 10)
+            });
+
+            // 参数列表
+            var paramsList = recording.Parameters ?? new List<ScriptParameter>();
+            var listbox = new ListBox { Margin = new Thickness(0, 0, 0, 10), MinHeight = 150 };
+            RefreshParamsList(listbox, paramsList);
+            mainSp.Children.Add(listbox);
+
+            // 当前脚本中的参数占位符
+            var placeholders = new List<string>();
+            foreach (var action in recording.Actions)
+            {
+                if (!string.IsNullOrEmpty(action.Parameter))
+                {
+                    var matches = System.Text.RegularExpressions.Regex.Matches(action.Parameter, @"\{(\w+)\}");
+                    foreach (System.Text.RegularExpressions.Match m in matches)
+                    {
+                        if (!placeholders.Contains(m.Groups[1].Value))
+                            placeholders.Add(m.Groups[1].Value);
+                    }
+                }
+            }
+
+            if (placeholders.Count > 0)
+            {
+                mainSp.Children.Add(new TextBlock
+                {
+                    Text = $"检测到的占位符: {string.Join(", ", placeholders)}",
+                    Foreground = Brushes.Blue,
+                    FontSize = 11,
+                    Margin = new Thickness(0, 0, 0, 10)
+                });
+            }
+
+            // 按钮
+            var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            var addBtn = new Button { Content = "添加", Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(0, 0, 5, 0) };
+            var editBtn = new Button { Content = "编辑", Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(0, 0, 5, 0) };
+            var deleteBtn = new Button { Content = "删除", Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(0, 0, 5, 0), Foreground = Brushes.Red };
+            var closeBtn = new Button { Content = "关闭", IsCancel = true, Padding = new Thickness(12, 5, 12, 5) };
+            bp.Children.Add(addBtn);
+            bp.Children.Add(editBtn);
+            bp.Children.Add(deleteBtn);
+            bp.Children.Add(closeBtn);
+            mainSp.Children.Add(bp);
+
+            Action saveAction = () =>
+            {
+                recording.Parameters = paramsList;
+                var opt = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
+                File.WriteAllText(_currentScript.FilePath, System.Text.Json.JsonSerializer.Serialize(recording, opt));
+            };
+
+            addBtn.Click += (_, _) =>
+            {
+                var param = ShowAddParamDialog();
+                if (param != null)
+                {
+                    paramsList.Add(param);
+                    RefreshParamsList(listbox, paramsList);
+                    saveAction();
+                    AppendLog($"已添加参数: {param.Name}");
+                }
+            };
+
+            editBtn.Click += (_, _) =>
+            {
+                if (listbox.SelectedIndex < 0)
+                {
+                    MessageBox.Show("请先选择要编辑的参数");
+                    return;
+                }
+                var param = paramsList[listbox.SelectedIndex];
+                var edited = ShowAddParamDialog(param);
+                if (edited != null)
+                {
+                    paramsList[listbox.SelectedIndex] = edited;
+                    RefreshParamsList(listbox, paramsList);
+                    saveAction();
+                    AppendLog($"已编辑参数: {edited.Name}");
+                }
+            };
+
+            deleteBtn.Click += (_, _) =>
+            {
+                if (listbox.SelectedIndex < 0)
+                {
+                    MessageBox.Show("请先选择要删除的参数");
+                    return;
+                }
+                var paramName = paramsList[listbox.SelectedIndex].Name;
+                if (MessageBox.Show($"确定删除参数 \"{paramName}\" 吗？", "确认", MessageBoxButton.YesNo) == MessageBoxResult.Yes)
+                {
+                    paramsList.RemoveAt(listbox.SelectedIndex);
+                    RefreshParamsList(listbox, paramsList);
+                    saveAction();
+                    AppendLog($"已删除参数: {paramName}");
+                }
+            };
+
+            w.Content = mainSp;
+            w.ShowDialog();
+        }
+
+        private void RefreshParamsList(ListBox listbox, List<ScriptParameter> paramsList)
+        {
+            listbox.Items.Clear();
+            foreach (var p in paramsList)
+            {
+                var typeStr = p.Type switch
+                {
+                    ParameterType.Number => "数字",
+                    ParameterType.Password => "密码",
+                    ParameterType.MultiLine => "多行",
+                    _ => "文本"
+                };
+                var required = p.IsRequired ? "必填" : "选填";
+                listbox.Items.Add($"[{typeStr}] {p.Name} ({p.DisplayName ?? p.Name}) = \"{p.DefaultValue}\" ({required})");
+            }
+        }
+
+        // ═══ 执行时参数输入对话框 ═══
+        private Dictionary<string, string> ShowParameterInputDialog(List<ScriptParameter> parameters)
+        {
+            if (parameters == null || parameters.Count == 0)
+                return null;
+
+            var w = new Window
+            {
+                Title = "输入脚本参数",
+                Width = 420,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                ResizeMode = ResizeMode.NoResize
+            };
+
+            var sp = new StackPanel { Margin = new Thickness(15) };
+            var inputs = new Dictionary<string, object>(); // TextBox 或 PasswordBox
+
+            foreach (var param in parameters)
+            {
+                // 标签
+                sp.Children.Add(new TextBlock
+                {
+                    Text = $"{param.DisplayName ?? param.Name}{(param.IsRequired ? " *" : "")}:",
+                    Margin = new Thickness(0, 0, 0, 3),
+                    FontWeight = param.IsRequired ? FontWeights.Bold : FontWeights.Normal
+                });
+
+                // 说明
+                if (!string.IsNullOrEmpty(param.Description))
+                {
+                    sp.Children.Add(new TextBlock
+                    {
+                        Text = param.Description,
+                        Foreground = Brushes.Gray,
+                        FontSize = 10,
+                        Margin = new Thickness(0, 0, 0, 3)
+                    });
+                }
+
+                // 根据类型创建输入控件
+                if (param.Type == ParameterType.Password)
+                {
+                    var pwdBox = new PasswordBox
+                    {
+                        Margin = new Thickness(0, 0, 0, 8)
+                    };
+                    if (!string.IsNullOrEmpty(param.DefaultValue))
+                        pwdBox.Password = param.DefaultValue;
+                    inputs[param.Name] = pwdBox;
+                    sp.Children.Add(pwdBox);
+                }
+                else if (param.Type == ParameterType.MultiLine)
+                {
+                    var textBox = new TextBox
+                    {
+                        Text = param.DefaultValue ?? "",
+                        Margin = new Thickness(0, 0, 0, 8),
+                        TextWrapping = TextWrapping.Wrap,
+                        AcceptsReturn = true,
+                        MinHeight = 80,
+                        VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+                    };
+                    inputs[param.Name] = textBox;
+                    sp.Children.Add(textBox);
+                }
+                else
+                {
+                    var textBox = new TextBox
+                    {
+                        Text = param.DefaultValue ?? "",
+                        Margin = new Thickness(0, 0, 0, 8)
+                    };
+                    inputs[param.Name] = textBox;
+                    sp.Children.Add(textBox);
+                }
+            }
+
+            // 提示信息
+            sp.Children.Add(new TextBlock
+            {
+                Text = "* 表示必填项",
+                Foreground = Brushes.Gray,
+                FontSize = 10,
+                Margin = new Thickness(0, 5, 0, 0)
+            });
+
+            // 按钮
+            var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            var ok = new Button { Content = "确定执行", IsDefault = true, Padding = new Thickness(15, 5, 15, 5), FontWeight = FontWeights.Bold };
+            var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(8, 0, 0, 0) };
+            bp.Children.Add(ok);
+            bp.Children.Add(cancel);
+            sp.Children.Add(bp);
+
+            w.Content = sp;
+
+            // 计算窗口高度
+            w.SizeToContent = SizeToContent.Height;
+
+            Dictionary<string, string> result = null;
+            ok.Click += (_, _) =>
+            {
+                // 验证必填项
+                foreach (var param in parameters)
+                {
+                    var input = inputs[param.Name];
+                    string value = input switch
+                    {
+                        TextBox tb => tb.Text,
+                        PasswordBox pb => pb.Password,
+                        _ => ""
+                    };
+
+                    if (param.IsRequired && string.IsNullOrWhiteSpace(value))
+                    {
+                        MessageBox.Show($"请填写必填参数: {param.DisplayName ?? param.Name}");
+                        return;
+                    }
+                }
+
+                // 收集结果
+                result = new Dictionary<string, string>();
+                foreach (var kvp in inputs)
+                {
+                    result[kvp.Key] = kvp.Value switch
+                    {
+                        TextBox tb => tb.Text,
+                        PasswordBox pb => pb.Password,
+                        _ => ""
+                    };
+                }
+                w.DialogResult = true;
+            };
+
+            w.ShowDialog();
+            return result;
+        }
+
+        // 修改 PlayAll 以支持参数输入
+        private async System.Threading.Tasks.Task PlayAllWithParams()
+        {
+            if (_steps.Count == 0) return;
+
+            // 检查是否有参数需要输入
+            Dictionary<string, string> parameters = null;
+            if (_currentScript != null)
+            {
+                try
+                {
+                    var rec = ActionRecorder.LoadFromFile(_currentScript.FilePath);
+                    if (rec.Parameters != null && rec.Parameters.Count > 0)
+                    {
+                        parameters = ShowParameterInputDialog(rec.Parameters);
+                        if (parameters == null) return; // 用户取消
+                    }
+                }
+                catch { }
+            }
+
+            PlayBtn.IsEnabled = false;
+            StopPlayBtn.IsEnabled = true;
+
+            if (parameters != null && _currentScript != null)
+            {
+                // 使用 ScriptExecutor 执行（支持参数替换）
+                var result = await App.ScriptExecutor.ExecuteScript(
+                    Path.GetFileNameWithoutExtension(_currentScript.FilePath),
+                    parameters);
+                AppendLog(result.Success ? "执行完成" : $"执行失败: {result.Message}");
+            }
+            else
+            {
+                await _player.Play(_steps.ToList());
+            }
+
+            PlayBtn.IsEnabled = _steps.Count > 0;
+            StopPlayBtn.IsEnabled = false;
+        }
     }
 
     public class ScriptInfo { public string FilePath { get; set; } public string Name { get; set; } public int StepCount { get; set; } public DateTime LastModified { get; set; } }
