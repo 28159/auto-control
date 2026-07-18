@@ -108,6 +108,26 @@
                                     Padding="14,6" Background="#E53935" Foreground="White" FontWeight="Bold"/>
                             <Button x:Name="StopBtn" Content="⏹ 停止" Click="StopBtn_Click"
                                     Padding="14,6" IsEnabled="False" Margin="4,0,0,0"/>
+                            <RadioButton x:Name="ClickModeCoordinate" Content="📍坐标" IsChecked="True"
+                                         GroupName="ClickMode" VerticalAlignment="Center"
+                                         Padding="4,0" Margin="8,0,0,0" FontSize="11" ToolTip="坐标模式 - 点击录制位置"
+                                         Checked="ClickModeRadioButton_Changed"/>
+                            <RadioButton x:Name="ClickModeUIAPath" Content="🔗路径"
+                                         GroupName="ClickMode" VerticalAlignment="Center"
+                                         Padding="4,0" Margin="2,0,0,0" FontSize="11" ToolTip="UIA路径模式 - 通过元素属性定位"
+                                         Checked="ClickModeRadioButton_Changed"/>
+                            <RadioButton x:Name="ClickModeVision" Content="👁视觉"
+                                         GroupName="ClickMode" VerticalAlignment="Center"
+                                         Padding="4,0" Margin="2,0,0,0" FontSize="11" ToolTip="视觉模式 - YOLO识别定位"
+                                         Checked="ClickModeRadioButton_Changed"/>
+                            <CheckBox x:Name="CaptureTrainingCheck" Content="采集训练数据" VerticalAlignment="Center"
+                                      Margin="8,0,0,0" FontSize="11" ToolTip="录制时自动截图保存，用于 YOLO 模型训练"
+                                      Checked="CaptureTrainingCheck_Changed" Unchecked="CaptureTrainingCheck_Changed"/>
+                            <TextBlock Text="模型:" VerticalAlignment="Center" Foreground="#666" Margin="8,0,3,0" FontSize="11"
+                                       ToolTip="脚本绑定的视觉模型（保存后回放/调用复用）"/>
+                            <ComboBox x:Name="VisionModelCombo" Width="150" VerticalAlignment="Center" FontSize="11"
+                                      ToolTip="选择视觉模式使用的 ONNX 模型（项目 models 目录）"
+                                      SelectionChanged="VisionModelCombo_SelectionChanged"/>
                         </StackPanel>
 
                         <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -136,14 +156,27 @@
                         <DataGrid Grid.Row="0" x:Name="StepsGrid" AutoGenerateColumns="False"
                                   CanUserAddRows="False" IsReadOnly="True" SelectionMode="Extended"
                                   GridLinesVisibility="Horizontal" AlternatingRowBackground="#FAFAFA"
-                                  MouseDoubleClick="StepsGrid_MouseDoubleClick" HeadersVisibility="Column">
+                                  MouseDoubleClick="StepsGrid_MouseDoubleClick" HeadersVisibility="Column"
+                                  LoadingRow="StepsGrid_LoadingRow">
                             <DataGrid.Columns>
                                 <DataGridCheckBoxColumn Header="启用" Width="40" Binding="{Binding IsEnabled, Mode=TwoWay}"/>
                                 <DataGridTextColumn Header="#" Binding="{Binding Order}" Width="35"/>
-                                <DataGridTextColumn Header="类型" Binding="{Binding ActionType}" Width="80"/>
+                                <DataGridTextColumn Header="类型" Binding="{Binding ActionType}" Width="70"/>
+                                <DataGridTextColumn Header="模式" Binding="{Binding ClickMode}" Width="50"/>
                                 <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="*"/>
                                 <DataGridTextColumn Header="参数" Binding="{Binding Parameter}" Width="180"/>
+                                <DataGridTextColumn Header="正则" Binding="{Binding RegexPattern}" Width="100"/>
                                 <DataGridTextColumn Header="延时" Binding="{Binding DelayMs}" Width="55"/>
+                                <DataGridTemplateColumn Header="操作" Width="100">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                                <Button Content="▶运行" Click="RunSingleAction_Click" Padding="4,1" Margin="0,0,3,0" FontSize="10" Tag="{Binding}"/>
+                                                <Button Content="🗑删除" Click="DeleteSingleAction_Click" Padding="4,1" FontSize="10" Foreground="Red" Tag="{Binding}"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
                             </DataGrid.Columns>
                         </DataGrid>
 
@@ -169,6 +202,7 @@
                                 <Button Content="⏳等应用" Click="AddWaitForApp_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
                                 <Button Content="📖阅读" Click="AddReadContent_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
                                 <Button Content="📖滚读" Click="AddScrollRead_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                <Button Content="🔍正则" Click="AddRegexMatch_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="正则识别屏幕内容"/>
                                 <Button Content="🖱滚动" Click="AddScroll_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
                                 <Button Content="📝参数" Click="AddInputParam_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="添加动态输入参数"/>
                             </WrapPanel>
@@ -178,6 +212,7 @@
                                 <Button Content="↑上移" Click="MoveUp_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
                                 <Button Content="↓下移" Click="MoveDown_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
                                 <Button Content="✏编辑" Click="Edit_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                <Button Content="🔄模式" Click="ToggleClickMode_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="切换选中步骤的点击模式"/>
                                 <Button Content="🗑删除" Click="Delete_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" Foreground="Red"/>
                                 <Button Content="批量删" Click="BatchDelete_Click" Padding="6,2" FontSize="11" Foreground="Red"/>
                             </WrapPanel>
@@ -237,6 +272,7 @@
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
@@ -268,7 +304,14 @@
                     </StackPanel>
                 </StackPanel>
 
-                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                <!-- ═══ YOLO 训练面板 ═══ -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Button x:Name="YoloWizardBtn" Content="🎯 训练向导" Click="YoloWizardBtn_Click" Padding="12,3" Background="#FF9800" Foreground="White" FontWeight="Bold" FontSize="11" ToolTip="标注 → 训练 → 导出 → 部署 一站式向导"/>
+                    <ProgressBar x:Name="YoloProgress" Width="60" Height="12" Minimum="0" Maximum="100" Value="0" Margin="6,0,3,0" ToolTip="训练进度"/>
+                    <TextBlock x:Name="YoloProgressText" Text="" FontSize="10" Foreground="#666" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button Content="刷新状态" Click="RefreshStatus_Click" Padding="8,3" FontSize="11"/>
                 </StackPanel>
             </Grid>

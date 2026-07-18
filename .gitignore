@@ -1,5 +1,36 @@
-﻿/src/WeChatAutomation.Core/bin/*
+# ── .NET 构建产物 ──
+/src/WeChatAutomation.Core/bin/*
 /src/WeChatAutomation.Core/obj/*
 /src/WeChatAutomation.App/obj/*
 /src/WeChatAutomation.App/bin/*
+**/bin/
+**/obj/
+
+# ── IDE ──
 /.idea/*
+/.vs/
+*.user
+*.suo
+
+# ── YOLO 训练产物 / 大文件（不入库）──
+/yolo_train/runs/
+/yolo_train/datasets/
+/yolo_train/__pycache__/
+/yolo_train/**/*.pyc
+# 训练产出的模型与预训练权重
+/yolo_train/models/*.onnx
+/yolo_train/models/*.pt
+/yolo_train/*.pt
+/yolo_train/*.onnx
+# 训练时生成的数据集配置（含本机绝对路径，属产物）
+/yolo_train/dataset.yaml
+
+# ── 运行期数据 ──
+/captures/
+/wizard.log
+/src/WeChatAutomation.App/bin/Debug/*/captures/
+/src/WeChatAutomation.App/bin/Debug/*/models/*.onnx
+
+# ── 发布产物 ──
+/publish/
+/releases/

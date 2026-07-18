@@ -1,12 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Automation;
 using WeChatAutomation.Core.Logging;
 using WeChatAutomation.Core.Native;
+using WeChatAutomation.Core.Vision;
 
 namespace WeChatAutomation.Core.Recording
 {
@@ -42,9 +45,66 @@ namespace WeChatAutomation.Core.Recording
         // 排除自身进程
         private readonly int _selfPid;
 
+        // 训练数据采集
+        private bool _captureTrainingData;
+        private string _capturesDir;
+        private int _captureIndex;
+        private static readonly Dictionary<string, int> ControlTypeToClassId = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Button"] = 0,
+            ["Edit"] = 1,
+            ["CheckBox"] = 2,
+            ["RadioButton"] = 3,
+            ["ComboBox"] = 4,
+            ["TabItem"] = 5,
+            ["MenuItem"] = 6,
+            ["Image"] = 7,
+            ["Hyperlink"] = 8,
+            ["Text"] = 9,
+            ["ToolBar"] = 10,
+        };
+
+        private static readonly string[] YoloClassNames = new[]
+        {
+            "button", "input", "checkbox", "radio", "dropdown",
+            "tab", "menu_item", "icon", "link", "text_field",
+            "search_box", "send_button", "close_button", "minimize_button",
+            "maximize_button", "scrollbar", "slider", "toggle", "tooltip", "image"
+        };
+
+        private static string ControlTypeToVisionLabel(string controlType)
+        {
+            if (string.IsNullOrEmpty(controlType)) return "button";
+
+            if (ControlTypeToClassId.TryGetValue(controlType, out int id) && id < YoloClassNames.Length)
+                return YoloClassNames[id];
+
+            return controlType.ToLower() switch
+            {
+                "button" or "splitbutton" => "button",
+                "edit" or "input" or "text" => "input",
+                "checkbox" => "checkbox",
+                "radio" or "radiobutton" => "radio",
+                "combo" or "combobox" or "dropdown" or "select" => "dropdown",
+                "tab" or "tabitem" => "tab",
+                "menu" or "menuitem" => "menu_item",
+                "image" or "picture" or "icon" => "icon",
+                "hyperlink" or "link" => "link",
+                "toolbar" => "search_box",
+                _ => "button"
+            };
+        }
+
         public bool IsRecording => _isRecording;
         public RecordMode Mode => _mode;
         public IReadOnlyList<RecordedAction> Nodes => _nodes.AsReadOnly();
+        public ClickMode CurrentClickMode { get; set; } = ClickMode.Coordinate;
+        public bool CaptureTrainingData
+        {
+            get => _captureTrainingData;
+            set => _captureTrainingData = value;
+        }
+        public string CapturesDir => _capturesDir;
 
         public event EventHandler<RecordedAction> NodeRecorded;
         public event EventHandler RecordingStarted;
@@ -69,11 +129,21 @@ namespace WeChatAutomation.Core.Recording
             _sw.Restart();
             _lastClickTime = DateTime.MinValue;
             _lastInputTime = DateTime.MinValue;
+            _captureIndex = 0;
+
+            if (_captureTrainingData)
+            {
+                _capturesDir = Path.Combine(
+                    AppPaths.CapturesDir,
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+                Directory.CreateDirectory(_capturesDir);
+                OnLog($"训练数据采集目录: {_capturesDir}");
+            }
 
             _mouseHook.StartCapture();
             _keyHook.StartCapture();
 
-            OnLog($"开始录制 (F9停止)");
+            OnLog($"开始录制 (F9停止){(_captureTrainingData ? " [训练数据采集开启]" : "")}");
             RecordingStarted?.Invoke(this, EventArgs.Empty);
         }
 
@@ -227,12 +297,18 @@ namespace WeChatAutomation.Core.Recording
             _sw.Restart();
 
             string desc = info.ElementName ?? info.ClassName ?? "";
+            string visionLabel = ControlTypeToVisionLabel(info.ControlType);
+            string name = CurrentClickMode == ClickMode.Coordinate
+                ? $"点击坐标({info.X},{info.Y})"
+                : CurrentClickMode == ClickMode.Vision
+                    ? $"视觉点击 {visionLabel}"
+                    : $"点击路径 {desc}";
 
             _nodes.Add(new RecordedAction
             {
                 Order = _nodes.Count + 1,
                 ActionType = ActionType.Click,
-                Name = $"点击 {desc}",
+                Name = name,
                 ClassName = info.ClassName,
                 ElementName = info.ElementName,
                 AutomationId = info.AutomationId,
@@ -240,10 +316,17 @@ namespace WeChatAutomation.Core.Recording
                 WindowTitle = info.WindowTitle,
                 X = info.X,
                 Y = info.Y,
-                DelayMs = delay
+                DelayMs = delay,
+                ClickMode = CurrentClickMode,
+                VisionLabel = CurrentClickMode == ClickMode.Vision ? visionLabel : null
             });
 
-            OnLog($"录制点击 #{_nodes.Count}: {desc}");
+            if (_captureTrainingData && info.WindowHandle != IntPtr.Zero)
+            {
+                SaveTrainingCapture(info);
+            }
+
+            OnLog($"录制点击 #{_nodes.Count}: {desc} ({CurrentClickMode})");
             NodeRecorded?.Invoke(this, _nodes[^1]);
         }
 
@@ -289,6 +372,20 @@ namespace WeChatAutomation.Core.Recording
             return removed > 0;
         }
 
+        public int RemoveNodes(IEnumerable<string> nodeIds)
+        {
+            var idSet = new HashSet<string>(nodeIds);
+            var removed = _nodes.RemoveAll(n => idSet.Contains(n.NodeId));
+            if (removed > 0)
+                for (int i = 0; i < _nodes.Count; i++) _nodes[i].Order = i + 1;
+            return removed;
+        }
+
+        public void ClearNodes()
+        {
+            _nodes.Clear();
+        }
+
         public void MoveNode(string nodeId, int newOrder)
         {
             var node = _nodes.Find(n => n.NodeId == nodeId);
@@ -298,6 +395,133 @@ namespace WeChatAutomation.Core.Recording
             _nodes.RemoveAt(old);
             _nodes.Insert(dest, node);
             for (int i = 0; i < _nodes.Count; i++) _nodes[i].Order = i + 1;
+        }
+
+        // ── 训练数据采集 ──
+
+        private void SaveTrainingCapture(MouseClickInfo info)
+        {
+            try
+            {
+                IntPtr topLevelHwnd = User32.GetAncestor(info.WindowHandle, User32.GA_ROOT);
+                if (topLevelHwnd == IntPtr.Zero) topLevelHwnd = info.WindowHandle;
+
+                User32.GetWindowRect(topLevelHwnd, out RECT winRect);
+                if (winRect.Width <= 0 || winRect.Height <= 0) return;
+
+                using var screenshot = WindowCapturer.CaptureWindow(topLevelHwnd);
+                if (screenshot == null) return;
+
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+                string imgPath = Path.Combine(_capturesDir, $"{timestamp}.png");
+                screenshot.Save(imgPath, ImageFormat.Png);
+
+                int classId = ResolveClassId(info);
+                if (classId < 0) return;
+
+                double cx = (double)(info.X - winRect.Left) / winRect.Width;
+                double cy = (double)(info.Y - winRect.Top) / winRect.Height;
+
+                double estW = EstimateElementWidth(info) / (double)winRect.Width;
+                double estH = EstimateElementHeight(info) / (double)winRect.Height;
+
+                cx = Math.Clamp(cx, 0, 1);
+                cy = Math.Clamp(cy, 0, 1);
+                estW = Math.Clamp(estW, 0.01, 1);
+                estH = Math.Clamp(estH, 0.01, 1);
+
+                string labelPath = Path.Combine(_capturesDir, $"{timestamp}.txt");
+                string labelLine = $"{classId} {cx:F6} {cy:F6} {estW:F6} {estH:F6}";
+                File.WriteAllText(labelPath, labelLine);
+
+                _captureIndex++;
+                OnLog($"训练数据 #{_captureIndex}: class={classId} ({info.ControlType ?? "unknown"}) @ ({cx:F3},{cy:F3})");
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn("Recorder", $"训练数据采集失败: {ex.Message}");
+            }
+        }
+
+        private static int ResolveClassId(MouseClickInfo info)
+        {
+            if (!string.IsNullOrEmpty(info.ControlType) &&
+                ControlTypeToClassId.TryGetValue(info.ControlType, out int id))
+            {
+                return id;
+            }
+
+            if (!string.IsNullOrEmpty(info.ClassName))
+            {
+                string cn = info.ClassName.ToLower();
+                if (cn.Contains("button") || cn.Contains("btn")) return 0;
+                if (cn.Contains("edit") || cn.Contains("input") || cn.Contains("text")) return 1;
+                if (cn.Contains("check")) return 2;
+                if (cn.Contains("radio")) return 3;
+                if (cn.Contains("combo") || cn.Contains("dropdown") || cn.Contains("select")) return 4;
+                if (cn.Contains("tab")) return 5;
+                if (cn.Contains("menu")) return 6;
+                if (cn.Contains("image") || cn.Contains("picture") || cn.Contains("icon")) return 7;
+                if (cn.Contains("link") || cn.Contains("hyperlink")) return 8;
+            }
+
+            if (!string.IsNullOrEmpty(info.ElementName))
+            {
+                string en = info.ElementName.ToLower();
+                if (en.Contains("发送") || en.Contains("send")) return 11;
+                if (en.Contains("关闭") || en.Contains("close")) return 12;
+                if (en.Contains("最小化") || en.Contains("minimize")) return 13;
+                if (en.Contains("最大化") || en.Contains("maximize")) return 14;
+                if (en.Contains("搜索") || en.Contains("search")) return 10;
+            }
+
+            return 0;
+        }
+
+        private static int EstimateElementWidth(MouseClickInfo info)
+        {
+            if (!string.IsNullOrEmpty(info.ControlType))
+            {
+                return info.ControlType switch
+                {
+                    "Button" => 80,
+                    "Edit" => 150,
+                    "CheckBox" => 16,
+                    "RadioButton" => 16,
+                    "ComboBox" => 120,
+                    "TabItem" => 80,
+                    "MenuItem" => 100,
+                    "Image" => 32,
+                    "Hyperlink" => 60,
+                    "Text" => 100,
+                    "ToolBar" => 200,
+                    _ => 40
+                };
+            }
+            return 40;
+        }
+
+        private static int EstimateElementHeight(MouseClickInfo info)
+        {
+            if (!string.IsNullOrEmpty(info.ControlType))
+            {
+                return info.ControlType switch
+                {
+                    "Button" => 28,
+                    "Edit" => 24,
+                    "CheckBox" => 16,
+                    "RadioButton" => 16,
+                    "ComboBox" => 24,
+                    "TabItem" => 28,
+                    "MenuItem" => 24,
+                    "Image" => 32,
+                    "Hyperlink" => 20,
+                    "Text" => 20,
+                    "ToolBar" => 28,
+                    _ => 24
+                };
+            }
+            return 24;
         }
 
         // ── 自身窗口排除 ──

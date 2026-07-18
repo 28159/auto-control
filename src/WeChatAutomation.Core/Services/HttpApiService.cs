@@ -80,6 +80,24 @@ namespace WeChatAutomation.Core.Services
                     return Results.Ok(info);
                 });
 
+                _app.MapGet("/api/scripts/{name}/params", (string name) =>
+                {
+                    var info = _executor.GetScriptInfo(name);
+                    if (info == null)
+                        return Results.NotFound(new { message = $"脚本不存在: {name}" });
+                    return Results.Ok(info.Parameters?.Select(p => new
+                    {
+                        p.Id,
+                        p.Name,
+                        DisplayName = p.DisplayName ?? p.Name,
+                        p.DefaultValue,
+                        p.IsRequired,
+                        p.Type,
+                        p.CopyToClipboard,
+                        p.Description
+                    }));
+                });
+
                 _app.MapPost("/api/scripts/execute", async (HttpRequest request) =>
                 {
                     try

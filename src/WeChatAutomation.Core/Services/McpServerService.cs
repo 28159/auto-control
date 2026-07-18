@@ -211,7 +211,7 @@ namespace WeChatAutomation.Core.Services
                             ["parameters"] = new McpSchemaProperty
                             {
                                 Type = "object",
-                                Description = "可选的参数字典，用于替换脚本中的占位符 {param}"
+                                Description = "参数字典，key 可使用参数 Id 或参数名称，value 为参数值。如 {\"abc123\": \"值\"} 或 {\"message\": \"你好\"}"
                             }
                         },
                         Required = new List<string> { "script_name" }
@@ -348,6 +348,9 @@ namespace WeChatAutomation.Core.Services
             var text = $"脚本名称: {info.Name}\n" +
                        $"创建时间: {info.CreatedAt}\n" +
                        $"步骤数量: {info.Actions?.Count ?? 0}\n" +
+                       $"参数列表:\n" +
+                       string.Join("\n", info.Parameters?.Select(p => $"  [{p.Id}] {p.Name} ({p.DisplayName ?? p.Name}) = \"{p.DefaultValue}\"{(p.CopyToClipboard ? " [→剪切板]" : "")}{(p.IsRequired ? " 必填" : " 选填")}") ?? Array.Empty<string>()) +
+                       (info.Parameters?.Count > 0 ? "\n" : "") +
                        $"步骤列表:\n" +
                        string.Join("\n", info.Actions?.Select(a => $"  {a.Order}. {a.Summary}") ?? Array.Empty<string>());
 

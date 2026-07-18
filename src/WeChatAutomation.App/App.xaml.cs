@@ -2,6 +2,7 @@ using System.Windows;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using WeChatAutomation.Core;
 using WeChatAutomation.Core.Logging;
 using WeChatAutomation.Core.Services;
 
@@ -74,6 +75,18 @@ public partial class App : Application
         }
 
         _logger.Info("App", "应用已启动");
+
+        // 诊断：把日志写到项目根 wizard.log，便于排查向导/标注问题
+        try
+        {
+            string logPath = System.IO.Path.Combine(AppPaths.ProjectRoot, "wizard.log");
+            Logger.Instance.AddSink(new FileSink(logPath));
+            _logger.Info("App", $"日志文件: {logPath}");
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn("App", $"无法创建日志文件: {ex.Message}");
+        }
     }
 
     protected override void OnExit(ExitEventArgs e)

@@ -92,15 +92,25 @@ namespace WeChatAutomation.Core.Services
                     };
                 }
 
-                // 参数替换（如果有的话）
+                if (parameters != null && parameters.Count > 0 && recordingFile.Parameters?.Count > 0)
+                {
+                    parameters = ResolveParameterIds(parameters, recordingFile.Parameters);
+                }
+
                 var actions = recordingFile.Actions.ToList();
                 if (parameters != null && parameters.Count > 0)
                 {
                     actions = ReplaceParameters(actions, parameters);
                 }
 
+                if (actions.Any(a => a.ClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision))
+                {
+                    // 使用脚本绑定的视觉模型（无头回放/HTTP/MCP 调用同样复用）
+                    _player.EnsureVisionModel(recordingFile.VisionModel);
+                }
+
                 _currentCts = new CancellationTokenSource();
-                await _player.Play(actions);
+                await _player.Play(actions, recordingFile.VisionModel);
 
                 return new ExecuteResult
                 {
@@ -178,6 +188,31 @@ namespace WeChatAutomation.Core.Services
             _player?.Stop();
         }
 
+        private Dictionary<string, string> ResolveParameterIds(Dictionary<string, string> inputParams, List<ScriptParameter> definedParams)
+        {
+            var resolved = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var kvp in inputParams)
+            {
+                var match = definedParams.FirstOrDefault(p =>
+                    string.Equals(p.Id, kvp.Key, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(p.Name, kvp.Key, StringComparison.OrdinalIgnoreCase));
+
+                if (match != null)
+                    resolved[match.Name] = kvp.Value;
+                else
+                    resolved[kvp.Key] = kvp.Value;
+            }
+
+            foreach (var def in definedParams)
+            {
+                if (!resolved.ContainsKey(def.Name) && !string.IsNullOrEmpty(def.DefaultValue))
+                    resolved[def.Name] = def.DefaultValue;
+            }
+
+            return resolved;
+        }
+
         private List<RecordedAction> ReplaceParameters(List<RecordedAction> actions, Dictionary<string, string> parameters)
         {
             var result = new List<RecordedAction>();
@@ -199,15 +234,34 @@ namespace WeChatAutomation.Core.Services
                     Parameter = action.Parameter,
                     DelayMs = action.DelayMs,
                     ScrollAmount = action.ScrollAmount,
+                    ParameterName = action.ParameterName,
+                    DefaultValue = action.DefaultValue,
+                    IsRequired = action.IsRequired,
+                    CopyToClipboard = action.CopyToClipboard,
+                    RegexPattern = action.RegexPattern,
+                    RegexGroup = action.RegexGroup,
+                    OutputParamName = action.OutputParamName,
                     IsEnabled = action.IsEnabled,
                     CreatedAt = action.CreatedAt
                 };
 
-                // 替换参数中的占位符
                 foreach (var kvp in parameters)
                 {
                     newAction.Parameter = newAction.Parameter.Replace($"{{{kvp.Key}}}", kvp.Value);
                     newAction.Name = newAction.Name.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.WindowTitle = newAction.WindowTitle?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                }
+
+                if (newAction.ActionType == ActionType.InputParam && newAction.CopyToClipboard)
+                {
+                    foreach (var kvp in parameters)
+                    {
+                        if (kvp.Key == newAction.ParameterName)
+                        {
+                            newAction.Parameter = kvp.Value;
+                            break;
+                        }
+                    }
                 }
 
                 result.Add(newAction);

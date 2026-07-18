@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.0.0)'
+        required: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+    
+    - name: Get version
+      id: version
+      run: |
+        if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+          echo "VERSION=${{ github.event.inputs.version }}" >> $env:GITHUB_OUTPUT
+        } else {
+          $tag = "${{ github.ref_name }}"
+          echo "VERSION=$tag" >> $env:GITHUB_OUTPUT
+        }
+    
+    - name: Publish x64
+      run: |
+        dotnet publish src/WeChatAutomation.App/WeChatAutomation.App.csproj `
+          -c Release `
+          -r win-x64 `
+          --self-contained true `
+          -p:PublishSingleFile=true `
+          -p:IncludeNativeLibrariesForSelfExtract=true `
+          -p:EnableCompressionInSingleFile=true `
+          -p:DebugType=None `
+          -p:DebugSymbols=false `
+          -o releases/x64 `
+          --nologo
+    
+    - name: Publish x86
+      run: |
+        dotnet publish src/WeChatAutomation.App/WeChatAutomation.App.csproj `
+          -c Release `
+          -r win-x86 `
+          --self-contained true `
+          -p:PublishSingleFile=true `
+          -p:IncludeNativeLibrariesForSelfExtract=true `
+          -p:EnableCompressionInSingleFile=true `
+          -p:DebugType=None `
+          -p:DebugSymbols=false `
+          -o releases/x86 `
+          --nologo
+    
+    - name: Publish ARM64
+      run: |
+        dotnet publish src/WeChatAutomation.App/WeChatAutomation.App.csproj `
+          -c Release `
+          -r win-arm64 `
+          --self-contained true `
+          -p:PublishSingleFile=true `
+          -p:IncludeNativeLibrariesForSelfExtract=true `
+          -p:EnableCompressionInSingleFile=true `
+          -p:DebugType=None `
+          -p:DebugSymbols=false `
+          -o releases/arm64 `
+          --nologo
+    
+    - name: Create ZIP files
+      run: |
+        Compress-Archive -Path "releases/x64/*" -DestinationPath "WeChatAutomation_${{ steps.version.outputs.VERSION }}_x64.zip"
+        Compress-Archive -Path "releases/x86/*" -DestinationPath "WeChatAutomation_${{ steps.version.outputs.VERSION }}_x86.zip"
+        Compress-Archive -Path "releases/arm64/*" -DestinationPath "WeChatAutomation_${{ steps.version.outputs.VERSION }}_arm64.zip"
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: "WeChatAutomation ${{ steps.version.outputs.VERSION }}"
+        body: |
+          ## WeChatAutomation ${{ steps.version.outputs.VERSION }}
+          
+          通用桌面自动化录制与回放工具，支持任意 Windows 应用。
+          
+          ### 下载
+          
+          - **x64**: 适用于大多数现代PC (Intel/AMD处理器)
+          - **x86**: 适用于32位系统
+          - **ARM64**: 适用于Surface Pro X等ARM设备
+          
+          ### 使用方法
+          
+          1. 下载并解压对应版本
+          2. 双击 `WeChatAutomation.exe` 启动
+          3. 按 F9 开始录制
+          4. 在任意应用中进行操作
+          5. 按 F9 停止录制
+          6. 按 F11 回放脚本
+          
+          ### 快捷键
+          
+          - **F9**: 开始/停止录制
+          - **F10**: 确认操作（一步一步模式）
+          - **F11**: 开始/停止回放
+        files: |
+          WeChatAutomation_${{ steps.version.outputs.VERSION }}_x64.zip
+          WeChatAutomation_${{ steps.version.outputs.VERSION }}_x86.zip
+          WeChatAutomation_${{ steps.version.outputs.VERSION }}_arm64.zip
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

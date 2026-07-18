@@ -9,6 +9,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using WeChatAutomation.Core.Native;
 using WeChatAutomation.Core.Recording;
+using WeChatAutomation.Core.Services;
 
 namespace WeChatAutomation.App
 {
@@ -16,11 +17,15 @@ namespace WeChatAutomation.App
     {
         private readonly ActionRecorder _recorder = new();
         private readonly ActionPlayer _player = new();
+        private readonly YoloTrainer _yoloTrainer = new();
         private readonly ObservableCollection<RecordedAction> _steps = new();
         private readonly ObservableCollection<ScriptInfo> _scripts = new();
         private readonly KeyboardHook _hotkeyHook = new();
         private string _scriptsDir;
         private ScriptInfo _currentScript;
+        private WeChatAutomation.Core.Recording.ClickMode _currentClickMode = WeChatAutomation.Core.Recording.ClickMode.Coordinate;
+        /// <summary>当前脚本绑定的视觉模型文件名（如 yolov8n-ui.onnx）；空表示用默认。</summary>
+        private string _currentVisionModel;
 
         public MainWindow()
         {
@@ -45,6 +50,23 @@ namespace WeChatAutomation.App
                 StartBtn.IsEnabled = true; StopBtn.IsEnabled = false;
                 PlayBtn.IsEnabled = _steps.Count > 0;
                 StatusDot.Fill = Brushes.Gray; StatusText.Text = "就绪";
+
+                if (_recorder.CaptureTrainingData)
+                {
+                    try
+                    {
+                        string capturesDir = _yoloTrainer.CapturesDir;
+                        if (Directory.Exists(capturesDir) && Directory.GetFiles(capturesDir, "*.png", SearchOption.AllDirectories).Length > 0)
+                        {
+                            var result = MessageBox.Show(
+                                "录制完成，已采集训练数据。\n是否立即开始 YOLO 训练向导？\n\n（标注 → 训练 → 导出 → 部署）",
+                                "训练向导", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                            if (result == MessageBoxResult.Yes)
+                                OpenYoloWizard();
+                        }
+                    }
+                    catch { }
+                }
             });
             _recorder.LogMessage += (s, msg) => AppendLog(msg);
 
@@ -52,16 +74,34 @@ namespace WeChatAutomation.App
             _player.PlayCompleted += (s, e) => Dispatcher.BeginInvoke(() =>
             {
                 StopPlayBtn.IsEnabled = false; PlayBtn.IsEnabled = _steps.Count > 0;
-                var last = _player.ReadResults.LastOrDefault();
-                if (last != null) ReadContentText.Text = $"[{last.CapturedAt:HH:mm:ss}] {last.WindowTitle}\n\n{last.Content}";
+                UpdateReadContentDisplay();
                 AppendLog("回放完成");
+            });
+            _player.PlayError += (s, msg) => Dispatcher.BeginInvoke(() =>
+            {
+                StopPlayBtn.IsEnabled = false; PlayBtn.IsEnabled = _steps.Count > 0;
+                AppendLog($"回放错误: {msg}");
             });
 
             _hotkeyHook.HotKeyPressed += (s, vk) => Dispatcher.BeginInvoke(() => OnHotKey(vk));
             _hotkeyHook.StartCapture();
 
+            _yoloTrainer.ProgressChanged += (s, p) => Dispatcher.BeginInvoke(() =>
+            {
+                YoloProgress.Value = p.Value * 100;
+                YoloProgressText.Text = p.Message;
+            });
+            _yoloTrainer.LogMessage += (s, msg) => Dispatcher.BeginInvoke(() => AppendLog($"[YOLO] {msg}"));
+            _yoloTrainer.Completed += (s, r) => Dispatcher.BeginInvoke(() =>
+            {
+                YoloProgress.Value = r.Success ? 100 : YoloProgress.Value;
+                YoloProgressText.Text = r.Success ? "完成" : "";
+            });
+
             LoadScriptsList();
             AppendLog("F9录制 F10确认 F11回放 | 双击步骤可编辑");
+            UpdateClickModeUI();
+            UpdateVisionModelUI();
 
             // 初始化服务状态显示
             Dispatcher.BeginInvoke(() => UpdateServiceStatus(), System.Windows.Threading.DispatcherPriority.Background);
@@ -81,9 +121,169 @@ namespace WeChatAutomation.App
         private void StartRecording()
         {
             if (_recorder.IsRecording) return;
+            _recorder.CurrentClickMode = _currentClickMode;
+            _recorder.CaptureTrainingData = CaptureTrainingCheck.IsChecked == true;
             _recorder.Start(RecordMode.Continuous);
         }
         private void StopRecording() { if (_recorder.IsRecording) _recorder.Stop(); }
+
+        // ═══ 点击模式 ═══
+        private void ClickModeRadioButton_Changed(object s, RoutedEventArgs e)
+        {
+            if (ClickModeCoordinate == null) return;
+            if (ClickModeCoordinate.IsChecked == true)
+                _currentClickMode = WeChatAutomation.Core.Recording.ClickMode.Coordinate;
+            else if (ClickModeUIAPath.IsChecked == true)
+                _currentClickMode = WeChatAutomation.Core.Recording.ClickMode.UIAPath;
+            else if (ClickModeVision.IsChecked == true)
+                _currentClickMode = WeChatAutomation.Core.Recording.ClickMode.Vision;
+            UpdateClickModeUI();
+        }
+
+        private void UpdateClickModeUI()
+        {
+            if (ClickModeCoordinate == null) return;
+            switch (_currentClickMode)
+            {
+                case WeChatAutomation.Core.Recording.ClickMode.Coordinate:
+                    ClickModeCoordinate.IsChecked = true;
+                    break;
+                case WeChatAutomation.Core.Recording.ClickMode.UIAPath:
+                    ClickModeUIAPath.IsChecked = true;
+                    break;
+                case WeChatAutomation.Core.Recording.ClickMode.Vision:
+                    ClickModeVision.IsChecked = true;
+                    break;
+            }
+        }
+
+        // ═══ 视觉模型选择（每脚本一个，保存复用） ═══
+
+        /// <summary>项目运行目录下 models/*.onnx 文件名列表。</summary>
+        private List<string> ListAvailableModels()
+        {
+            var list = new List<string>();
+            try
+            {
+                var dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "models");
+                if (Directory.Exists(dir))
+                    list.AddRange(Directory.GetFiles(dir, "*.onnx").Select(Path.GetFileName).OrderBy(n => n));
+            }
+            catch { }
+            return list;
+        }
+
+        /// <summary>刷新模型下拉框，保留当前选择。</summary>
+        private void UpdateVisionModelUI()
+        {
+            if (VisionModelCombo == null) return;
+
+            // 暂停 SelectionChanged，避免填充时误触发
+            VisionModelCombo.SelectionChanged -= VisionModelCombo_SelectionChanged;
+            try
+            {
+                VisionModelCombo.Items.Clear();
+                VisionModelCombo.Items.Add("(默认 yolov8n-ui.onnx)");
+                foreach (var m in ListAvailableModels())
+                    if (!VisionModelCombo.Items.Contains(m)) VisionModelCombo.Items.Add(m);
+
+                if (string.IsNullOrEmpty(_currentVisionModel))
+                    VisionModelCombo.SelectedIndex = 0;
+                else
+                {
+                    int idx = VisionModelCombo.Items.IndexOf(_currentVisionModel);
+                    VisionModelCombo.SelectedIndex = idx > 0 ? idx : 0;
+                }
+            }
+            finally { VisionModelCombo.SelectionChanged += VisionModelCombo_SelectionChanged; }
+        }
+
+        private void VisionModelCombo_SelectionChanged(object s, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (VisionModelCombo.SelectedIndex <= 0)
+                _currentVisionModel = null;
+            else
+                _currentVisionModel = VisionModelCombo.SelectedItem as string;
+
+            // 切模型后，如果当前是视觉模式，立即预加载新模型
+            if (_currentClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision && !string.IsNullOrEmpty(_currentVisionModel))
+                _player.EnsureVisionModel(_currentVisionModel);
+
+            // 显示模型元数据（类别数/输入尺寸/类别名），便于判断是否兼容
+            string info = DescribeCurrentModel();
+            VisionModelCombo.ToolTip = string.IsNullOrEmpty(info)
+                ? "选择视觉模式使用的 ONNX 模型（项目 models 目录）"
+                : info;
+
+            if (string.IsNullOrEmpty(_currentVisionModel))
+            {
+                AppendLog("视觉模型: 默认");
+            }
+            else
+            {
+                AppendLog($"视觉模型已选择: {_currentVisionModel}（保存脚本后生效）");
+                if (!string.IsNullOrEmpty(info)) AppendLog(info);
+            }
+        }
+
+        /// <summary>
+        /// 读取当前已加载模型的元数据，返回多行描述；未加载则尝试加载后读取。
+        /// </summary>
+        private string DescribeCurrentModel()
+        {
+            try
+            {
+                // 若尚未加载则临时加载（仅读取元数据，不阻塞）
+                if (!_player.IsVisionReady && !string.IsNullOrEmpty(_currentVisionModel))
+                    _player.EnsureVisionModel(_currentVisionModel);
+
+                var det = _player.VisionDetector;
+                if (det == null || !det.IsLoaded) return "";
+
+                var labels = det.Labels;
+                var (w, h) = det.InputSize;
+                string labelNames = labels.Count > 0
+                    ? string.Join(", ", labels.Take(8)) + (labels.Count > 8 ? " ..." : "")
+                    : "(无)";
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"模型: {System.IO.Path.GetFileName(det.ModelPath)}");
+                sb.AppendLine($"输入尺寸: {w}x{h}");
+                sb.AppendLine($"类别数: {labels.Count}");
+                sb.AppendLine($"类别: {labelNames}");
+                return sb.ToString().TrimEnd();
+            }
+            catch { return ""; }
+        }
+
+
+        private void ToggleClickMode_Click(object s, RoutedEventArgs e)
+        {
+            if (StepsGrid.SelectedItem is not RecordedAction n) { MessageBox.Show("请先选择步骤"); return; }
+            if (n.ActionType != ActionType.Click) { MessageBox.Show("只能切换点击步骤的模式"); return; }
+            n.ClickMode = n.ClickMode switch
+            {
+                WeChatAutomation.Core.Recording.ClickMode.Coordinate => WeChatAutomation.Core.Recording.ClickMode.UIAPath,
+                WeChatAutomation.Core.Recording.ClickMode.UIAPath => WeChatAutomation.Core.Recording.ClickMode.Vision,
+                _ => WeChatAutomation.Core.Recording.ClickMode.Coordinate
+            };
+            n.Name = n.ClickMode switch
+            {
+                WeChatAutomation.Core.Recording.ClickMode.Coordinate => $"点击坐标({n.X:F0},{n.Y:F0})",
+                WeChatAutomation.Core.Recording.ClickMode.Vision => $"视觉点击 {n.VisionLabel ?? "button"}",
+                _ => $"点击路径 {n.ElementName ?? n.ClassName ?? n.AutomationId ?? "未知"}"
+            };
+            RefreshGrid();
+            AppendLog($"步骤 #{n.Order} 切换为 {n.ClickMode} 模式");
+        }
+
+        private void CaptureTrainingCheck_Changed(object s, RoutedEventArgs e)
+        {
+            _recorder.CaptureTrainingData = CaptureTrainingCheck.IsChecked == true;
+            if (CaptureTrainingCheck.IsChecked == true)
+            {
+                AppendLog("训练数据采集已开启 - 录制时将自动截图保存到 captures/ 目录");
+            }
+        }
 
         // ═══ 新增步骤 ═══
         private void AddClick_Click(object s, RoutedEventArgs e) => AddOrRun(ActionType.Click, name: "点击");
@@ -191,9 +391,261 @@ namespace WeChatAutomation.App
             if (int.TryParse(n, out int v)) AddOrRun(ActionType.Scroll, v.ToString(), $"滚动{v}行");
         }
 
+        private void AddRegexMatch_Click(object s, RoutedEventArgs e)
+        {
+            var node = ShowRegexMatchDialog();
+            if (node == null) return;
+            _recorder.AddManual(node);
+            RefreshGrid();
+            PlayBtn.IsEnabled = _steps.Count > 0;
+            AppendLog($"已添加正则识别步骤: {node.RegexPattern}");
+        }
+
+        private RecordedAction ShowRegexMatchDialog(RecordedAction existing = null)
+        {
+            var w = new Window
+            {
+                Title = existing != null ? "编辑正则识别" : "添加正则识别",
+                Width = 480,
+                Height = 490,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                ResizeMode = ResizeMode.NoResize
+            };
+
+            var sp = new StackPanel { Margin = new Thickness(15) };
+
+            sp.Children.Add(new TextBlock { Text = "目标窗口标题 (留空=当前窗口):", Margin = new Thickness(0, 0, 0, 3) });
+            var windowTitleBox = new TextBox { Text = existing?.WindowTitle ?? "", Margin = new Thickness(0, 0, 0, 8), ToolTip = "如: 微信, 记事本" };
+            sp.Children.Add(windowTitleBox);
+
+            sp.Children.Add(new TextBlock { Text = "正则表达式:", Margin = new Thickness(0, 0, 0, 3), FontWeight = FontWeights.Bold });
+            var patternBox = new TextBox
+            {
+                Text = existing?.RegexPattern ?? "",
+                Margin = new Thickness(0, 0, 0, 3),
+                ToolTip = "如: 金额[：:]\\s*([\\d.]+) 或 \\d{4}-\\d{2}-\\d{2}"
+            };
+            sp.Children.Add(patternBox);
+
+            sp.Children.Add(new TextBlock { Text = "提取分组 (留空=整条匹配, 数字=第N组, 字符串=命名组):", Margin = new Thickness(0, 0, 0, 3) });
+            var groupBox = new TextBox { Text = existing?.RegexGroup ?? "", Margin = new Thickness(0, 0, 0, 8), ToolTip = "如: 1 或 amount" };
+            sp.Children.Add(groupBox);
+
+            var templatePanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 3) };
+            var templateLabel = new TextBlock { Text = "常用:", VerticalAlignment = VerticalAlignment.Center, FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 4, 0) };
+            templatePanel.Children.Add(templateLabel);
+
+            var templates = new (string Label, string Pattern, string Group)[]
+            {
+                ("金额", @"金额[：:]\s*([\d.]+)", "1"),
+                ("日期", @"(\d{4}[-/]\d{2}[-/]\d{2})", "1"),
+                ("手机号", @"(1[3-9]\d{9})", "1"),
+                ("邮箱", @"([\w.+-]+@[\w-]+\.[\w.]+)", "1"),
+                ("姓名", @"姓名[：:]\s*(\S+)", "1"),
+                ("数字", @"([\d.]+)", "1"),
+                ("身份证", @"(\d{17}[\dXx])", "1"),
+            };
+
+            foreach (var t in templates)
+            {
+                var btn = new Button
+                {
+                    Content = t.Label,
+                    Padding = new Thickness(4, 1, 4, 1),
+                    FontSize = 10,
+                    Margin = new Thickness(0, 0, 2, 0),
+                    Tag = (t.Pattern, t.Group)
+                };
+                btn.Click += (_, _) =>
+                {
+                    var (p, g) = ((string, string))btn.Tag;
+                    patternBox.Text = p;
+                    groupBox.Text = g;
+                };
+                templatePanel.Children.Add(btn);
+            }
+            sp.Children.Add(templatePanel);
+
+            sp.Children.Add(new TextBlock { Text = "输出变量名 (匹配值存入变量，后续步骤用 {变量名} 引用):", Margin = new Thickness(0, 0, 0, 3) });
+            var outputBox = new TextBox { Text = existing?.OutputParamName ?? "", Margin = new Thickness(0, 0, 0, 8), ToolTip = "如: price, date" };
+            sp.Children.Add(outputBox);
+
+            var copyToClipboardBox = new CheckBox
+            {
+                Content = "复制匹配值到剪切板",
+                IsChecked = existing?.CopyToClipboard ?? false,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            sp.Children.Add(copyToClipboardBox);
+
+            var testBtn = new Button { Content = "测试匹配", Padding = new Thickness(12, 4, 12, 4), Margin = new Thickness(0, 0, 0, 8) };
+            sp.Children.Add(testBtn);
+
+            var testResult = new TextBlock
+            {
+                Text = "",
+                Foreground = Brushes.DarkGreen,
+                FontSize = 11,
+                Margin = new Thickness(0, 0, 0, 8),
+                TextWrapping = TextWrapping.Wrap,
+                MaxHeight = 60
+            };
+            sp.Children.Add(testResult);
+
+            testBtn.Click += (_, _) =>
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(patternBox.Text))
+                    {
+                        testResult.Text = "请输入正则表达式";
+                        testResult.Foreground = Brushes.Red;
+                        return;
+                    }
+
+                    IntPtr hwnd = IntPtr.Zero;
+                    if (!string.IsNullOrEmpty(windowTitleBox.Text))
+                    {
+                        hwnd = User32.FindWindowByTitle(windowTitleBox.Text);
+                    }
+                    if (hwnd == IntPtr.Zero) hwnd = User32.GetForegroundWindow();
+                    if (hwnd == IntPtr.Zero)
+                    {
+                        testResult.Text = "无法获取目标窗口";
+                        testResult.Foreground = Brushes.Red;
+                        return;
+                    }
+
+                    var element = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
+                    var content = ExtractTestContent(element);
+
+                    var regex = new System.Text.RegularExpressions.Regex(
+                        patternBox.Text,
+                        System.Text.RegularExpressions.RegexOptions.Multiline |
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    var matches = regex.Matches(content);
+
+                    if (matches.Count == 0)
+                    {
+                        testResult.Text = $"未匹配 (内容前100字: {(content.Length > 100 ? content[..100] : content)})";
+                        testResult.Foreground = Brushes.Orange;
+                    }
+                    else
+                    {
+                        string value;
+                        if (!string.IsNullOrEmpty(groupBox.Text))
+                        {
+                            if (int.TryParse(groupBox.Text, out int gi) && gi < matches[0].Groups.Count)
+                                value = matches[0].Groups[gi].Value;
+                            else
+                                value = matches[0].Groups[groupBox.Text]?.Value ?? matches[0].Value;
+                        }
+                        else
+                        {
+                            value = matches.Count == 1 ? matches[0].Value : $"{matches.Count}处匹配: {matches[0].Value} ...";
+                        }
+                        testResult.Text = $"匹配 {matches.Count} 处: {value}";
+                        testResult.Foreground = Brushes.DarkGreen;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    testResult.Text = $"错误: {ex.Message}";
+                    testResult.Foreground = Brushes.Red;
+                }
+            };
+
+            var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            var ok = new Button { Content = "确定", IsDefault = true, Padding = new Thickness(15, 5, 15, 5), FontWeight = FontWeights.Bold };
+            var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(8, 0, 0, 0) };
+            bp.Children.Add(ok);
+            bp.Children.Add(cancel);
+            sp.Children.Add(bp);
+
+            w.Content = sp;
+
+            RecordedAction result = null;
+            ok.Click += (_, _) =>
+            {
+                if (string.IsNullOrWhiteSpace(patternBox.Text))
+                {
+                    MessageBox.Show("请输入正则表达式");
+                    return;
+                }
+
+                try
+                {
+                    _ = new System.Text.RegularExpressions.Regex(patternBox.Text);
+                }
+                catch (System.Text.RegularExpressions.RegexParseException ex)
+                {
+                    MessageBox.Show($"正则表达式语法错误:\n{ex.Message}");
+                    return;
+                }
+
+                result = new RecordedAction
+                {
+                    ActionType = ActionType.RegexMatch,
+                    Name = $"正则识别 {patternBox.Text}",
+                    WindowTitle = windowTitleBox.Text.Trim(),
+                    RegexPattern = patternBox.Text.Trim(),
+                    RegexGroup = groupBox.Text.Trim(),
+                    OutputParamName = outputBox.Text.Trim(),
+                    CopyToClipboard = copyToClipboardBox.IsChecked == true,
+                    DelayMs = 300
+                };
+                w.DialogResult = true;
+            };
+
+            w.ShowDialog();
+            return result;
+        }
+
+        private string ExtractTestContent(System.Windows.Automation.AutomationElement element, int depth = 0, int maxDepth = 5)
+        {
+            if (depth > maxDepth || element == null) return "";
+            var texts = new List<string>();
+            try
+            {
+                string name = element.Current.Name;
+                if (!string.IsNullOrWhiteSpace(name)) texts.Add(name);
+                if (element.TryGetCurrentPattern(System.Windows.Automation.ValuePattern.Pattern, out object patternObj))
+                {
+                    var vp = (System.Windows.Automation.ValuePattern)patternObj;
+                    string val = vp.Current.Value;
+                    if (!string.IsNullOrWhiteSpace(val) && val != name) texts.Add(val);
+                }
+                var children = element.FindAll(System.Windows.Automation.TreeScope.Children, System.Windows.Automation.Condition.TrueCondition);
+                foreach (System.Windows.Automation.AutomationElement child in children)
+                {
+                    string childText = ExtractTestContent(child, depth + 1, maxDepth);
+                    if (!string.IsNullOrWhiteSpace(childText)) texts.Add(childText);
+                }
+            }
+            catch { }
+            return string.Join("\n", texts.Where(t => !string.IsNullOrWhiteSpace(t)));
+        }
+
         private void AddOrRun(ActionType type, string parameter = "", string name = "", int delayMs = -1)
         {
-            _recorder.AddManual(type, parameter, name, delayMs);
+            if (type == ActionType.Click)
+            {
+                var node = new RecordedAction
+                {
+                    Order = _steps.Count + 1,
+                    ActionType = ActionType.Click,
+                    Name = name,
+                    Parameter = parameter,
+                    DelayMs = delayMs >= 0 ? delayMs : 0,
+                    ClickMode = _currentClickMode
+                };
+                _recorder.AddManual(node);
+            }
+            else
+            {
+                _recorder.AddManual(type, parameter, name, delayMs);
+            }
             RefreshGrid();
             PlayBtn.IsEnabled = _steps.Count > 0;
         }
@@ -223,24 +675,28 @@ namespace WeChatAutomation.App
 
         private void ShowEditDialog(RecordedAction node)
         {
-            // 如果是 InputParam 类型，使用专门的参数编辑对话框
             if (node.ActionType == ActionType.InputParam)
             {
                 ShowEditInputParamDialog(node);
                 return;
             }
 
+            if (node.ActionType == ActionType.RegexMatch)
+            {
+                ShowEditRegexMatchDialog(node);
+                return;
+            }
+
             var w = new Window
             {
                 Title = $"编辑步骤 #{node.Order}",
-                Width = 400, Height = 320,
+                Width = 400, Height = 360,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Owner = this, ResizeMode = ResizeMode.NoResize
             };
 
             var sp = new StackPanel { Margin = new Thickness(15) };
 
-            // 类型
             sp.Children.Add(new TextBlock { Text = "类型:", Margin = new Thickness(0, 0, 0, 3) });
             var typeCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8) };
             foreach (ActionType t in Enum.GetValues(typeof(ActionType)))
@@ -248,22 +704,41 @@ namespace WeChatAutomation.App
             typeCombo.SelectedItem = node.ActionType.ToString();
             sp.Children.Add(typeCombo);
 
-            // 名称
             sp.Children.Add(new TextBlock { Text = "名称:", Margin = new Thickness(0, 0, 0, 3) });
             var nameBox = new TextBox { Text = node.Name ?? "", Margin = new Thickness(0, 0, 0, 8) };
             sp.Children.Add(nameBox);
 
-            // 参数
+            sp.Children.Add(new TextBlock { Text = "目标窗口标题:", Margin = new Thickness(0, 0, 0, 3) });
+            var windowTitleBox = new TextBox { Text = node.WindowTitle ?? "", Margin = new Thickness(0, 0, 0, 8), ToolTip = "留空=当前前台窗口" };
+            sp.Children.Add(windowTitleBox);
+
             sp.Children.Add(new TextBlock { Text = "参数:", Margin = new Thickness(0, 0, 0, 3) });
             var paramBox = new TextBox { Text = node.Parameter ?? "", Margin = new Thickness(0, 0, 0, 8), TextWrapping = TextWrapping.Wrap, AcceptsReturn = true, MaxHeight = 80 };
             sp.Children.Add(paramBox);
 
-            // 延时
             sp.Children.Add(new TextBlock { Text = "延时(毫秒):", Margin = new Thickness(0, 0, 0, 3) });
             var delayBox = new TextBox { Text = node.DelayMs.ToString(), Margin = new Thickness(0, 0, 0, 8), Width = 100, HorizontalAlignment = HorizontalAlignment.Left };
             sp.Children.Add(delayBox);
 
-            // 坐标（点击类型才显示）
+            var clickModePanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            clickModePanel.Children.Add(new TextBlock { Text = "点击模式:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var clickModeCombo = new ComboBox { Width = 120 };
+            clickModeCombo.Items.Add("Coordinate");
+            clickModeCombo.Items.Add("UIAPath");
+            clickModeCombo.Items.Add("Vision");
+            clickModeCombo.SelectedItem = node.ClickMode.ToString();
+            clickModePanel.Children.Add(clickModeCombo);
+            sp.Children.Add(clickModePanel);
+
+            var visionLabelPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            visionLabelPanel.Children.Add(new TextBlock { Text = "视觉标签:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var visionLabelBox = new TextBox { Text = node.VisionLabel ?? "", Width = 120, ToolTip = "YOLO检测目标类别，如: button, send_button, input" };
+            visionLabelPanel.Children.Add(visionLabelBox);
+            visionLabelPanel.Children.Add(new TextBlock { Text = "置信度:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 5, 0) });
+            var visionConfBox = new TextBox { Text = node.VisionConfThreshold > 0 ? node.VisionConfThreshold.ToString() : "0.5", Width = 50, ToolTip = "检测置信度阈值 (0-1)" };
+            visionLabelPanel.Children.Add(visionConfBox);
+            sp.Children.Add(visionLabelPanel);
+
             var coordPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
             coordPanel.Children.Add(new TextBlock { Text = "坐标 X:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
             var xBox = new TextBox { Text = node.X.ToString("F0"), Width = 60, Margin = new Thickness(0, 0, 10, 0) };
@@ -283,14 +758,17 @@ namespace WeChatAutomation.App
 
             ok.Click += (_, _) =>
             {
-                // 应用修改
                 if (Enum.TryParse<ActionType>(typeCombo.SelectedItem?.ToString(), out var newType))
                     node.ActionType = newType;
                 node.Name = nameBox.Text;
+                node.WindowTitle = windowTitleBox.Text.Trim();
                 node.Parameter = paramBox.Text;
                 if (int.TryParse(delayBox.Text, out int d)) node.DelayMs = d;
                 if (double.TryParse(xBox.Text, out double x)) node.X = x;
                 if (double.TryParse(yBox.Text, out double y)) node.Y = y;
+                if (Enum.TryParse<WeChatAutomation.Core.Recording.ClickMode>(clickModeCombo.SelectedItem?.ToString(), out var cm)) node.ClickMode = cm;
+                node.VisionLabel = visionLabelBox.Text.Trim();
+                if (float.TryParse(visionConfBox.Text, out float vc) && vc > 0) node.VisionConfThreshold = vc;
                 w.DialogResult = true;
             };
 
@@ -305,11 +783,13 @@ namespace WeChatAutomation.App
         {
             var param = new ScriptParameter
             {
+                Id = node.ParameterName ?? Guid.NewGuid().ToString("N")[..8],
                 Name = node.ParameterName ?? "",
                 DisplayName = node.Name?.Replace("参数: ", "") ?? "",
                 DefaultValue = node.DefaultValue ?? "",
                 IsRequired = node.IsRequired,
-                Type = ParameterType.Text
+                Type = ParameterType.Text,
+                CopyToClipboard = node.CopyToClipboard
             };
 
             var edited = ShowAddParamDialog(param);
@@ -319,16 +799,41 @@ namespace WeChatAutomation.App
                 node.Name = $"参数: {edited.DisplayName ?? edited.Name}";
                 node.DefaultValue = edited.DefaultValue;
                 node.IsRequired = edited.IsRequired;
+                node.CopyToClipboard = edited.CopyToClipboard;
                 node.Parameter = $"{{{edited.Name}}}";
                 RefreshGrid();
                 AppendLog($"编辑参数步骤: {edited.Name}");
             }
         }
 
+        private void ShowEditRegexMatchDialog(RecordedAction node)
+        {
+            var edited = ShowRegexMatchDialog(node);
+            if (edited != null)
+            {
+                node.Name = edited.Name;
+                node.WindowTitle = edited.WindowTitle;
+                node.RegexPattern = edited.RegexPattern;
+                node.RegexGroup = edited.RegexGroup;
+                node.OutputParamName = edited.OutputParamName;
+                node.CopyToClipboard = edited.CopyToClipboard;
+                RefreshGrid();
+                AppendLog($"编辑正则识别步骤: {edited.RegexPattern}");
+            }
+        }
+
         private void Delete_Click(object s, RoutedEventArgs e)
         {
-            if (StepsGrid.SelectedItem is RecordedAction n)
-            { _recorder.RemoveNode(n.NodeId); RefreshGrid(); PlayBtn.IsEnabled = _steps.Count > 0; }
+            if (StepsGrid.SelectedItem is not RecordedAction n) return;
+            string nodeId = n.NodeId;
+            bool removed = _recorder.RemoveNode(nodeId);
+            if (!removed)
+            {
+                _steps.Remove(n);
+                SyncStepsToRecorder();
+            }
+            RefreshGrid();
+            PlayBtn.IsEnabled = _steps.Count > 0;
         }
 
         private void BatchDelete_Click(object s, RoutedEventArgs e)
@@ -336,16 +841,71 @@ namespace WeChatAutomation.App
             var selected = StepsGrid.SelectedItems.Cast<RecordedAction>().ToList();
             if (selected.Count == 0) { MessageBox.Show("请先选择要删除的步骤"); return; }
             if (MessageBox.Show($"确定删除 {selected.Count} 个步骤吗？", "确认", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
-            foreach (var n in selected) _recorder.RemoveNode(n.NodeId);
-            RefreshGrid(); PlayBtn.IsEnabled = _steps.Count > 0;
+            var nodeIds = selected.Select(n => n.NodeId).ToList();
+            int removed = _recorder.RemoveNodes(nodeIds);
+            if (removed < selected.Count)
+            {
+                foreach (var n in selected) _steps.Remove(n);
+                SyncStepsToRecorder();
+            }
+            RefreshGrid();
+            PlayBtn.IsEnabled = _steps.Count > 0;
             AppendLog($"已删除 {selected.Count} 个步骤");
         }
 
         private void RefreshGrid()
         {
+            StepsGrid.ItemsSource = null;
             _steps.Clear();
             foreach (var n in _recorder.Nodes) _steps.Add(n);
+            StepsGrid.ItemsSource = _steps;
             StepCountText.Text = _steps.Count.ToString();
+        }
+
+        private void SyncStepsToRecorder()
+        {
+            _recorder.ClearNodes();
+            foreach (var s in _steps) _recorder.AddManual(s);
+        }
+
+        private void StepsGrid_LoadingRow(object sender, DataGridRowEventArgs e)
+        {
+        }
+
+        private async void RunSingleAction_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button btn || btn.Tag is not RecordedAction action) return;
+            if (_player.IsPlaying) { AppendLog("正在回放中，请先停止"); return; }
+
+            if (action.ClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision)
+            {
+                _player.EnsureVisionModel(_currentVisionModel);
+            }
+
+            AppendLog($"单独执行步骤 #{action.Order}: {action.Name}");
+            try
+            {
+                PlayBtn.IsEnabled = false; StopPlayBtn.IsEnabled = true;
+                await _player.Play(new List<RecordedAction> { action }, _currentVisionModel);
+                StopPlayBtn.IsEnabled = false; PlayBtn.IsEnabled = _steps.Count > 0;
+                UpdateReadContentDisplay();
+            }
+            catch (Exception ex) { AppendLog($"执行失败: {ex.Message}"); StopPlayBtn.IsEnabled = false; PlayBtn.IsEnabled = _steps.Count > 0; }
+        }
+
+        private void DeleteSingleAction_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button btn || btn.Tag is not RecordedAction action) return;
+            string nodeId = action.NodeId;
+            bool removed = _recorder.RemoveNode(nodeId);
+            if (!removed)
+            {
+                _steps.Remove(action);
+                SyncStepsToRecorder();
+            }
+            RefreshGrid();
+            PlayBtn.IsEnabled = _steps.Count > 0;
+            AppendLog($"已删除步骤 #{action.Order}: {action.Name}");
         }
 
         // ═══ 回放 ═══
@@ -354,8 +914,14 @@ namespace WeChatAutomation.App
         private async System.Threading.Tasks.Task PlayAll()
         {
             if (_steps.Count == 0) return;
+
+            if (_steps.Any(s => s.ClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision))
+            {
+                _player.EnsureVisionModel(_currentVisionModel);
+            }
+
             PlayBtn.IsEnabled = false; StopPlayBtn.IsEnabled = true;
-            await _player.Play(_steps.ToList());
+            await _player.Play(_steps.ToList(), _currentVisionModel);
             PlayBtn.IsEnabled = _steps.Count > 0; StopPlayBtn.IsEnabled = false;
         }
 
@@ -383,8 +949,14 @@ namespace WeChatAutomation.App
                 {
                     var rec = ActionRecorder.LoadFromFile(script.FilePath);
                     _steps.Clear(); foreach (var a in rec.Actions) _steps.Add(a);
+                    SyncStepsToRecorder();
+                    _currentClickMode = rec.DefaultClickMode;
+                    _currentVisionModel = rec.VisionModel;
+                    UpdateClickModeUI();
+                    UpdateVisionModelUI();
                     PlayBtn.IsEnabled = _steps.Count > 0; StepCountText.Text = _steps.Count.ToString();
-                    AppendLog($"已加载: {script.Name} ({_steps.Count} 步)");
+                    AppendLog($"已加载: {script.Name} ({_steps.Count} 步, {_currentClickMode}模式)" +
+                              (string.IsNullOrEmpty(_currentVisionModel) ? "" : $", 视觉模型: {_currentVisionModel}"));
                 } catch (Exception ex) { AppendLog($"加载失败: {ex.Message}"); }
             }
         }
@@ -504,7 +1076,9 @@ namespace WeChatAutomation.App
                     Name = _currentScript.Name,
                     CreatedAt = DateTime.Now,
                     Actions = _steps.ToList(),
-                    Parameters = existingParams ?? new List<ScriptParameter>()
+                    Parameters = existingParams ?? new List<ScriptParameter>(),
+                    DefaultClickMode = _currentClickMode,
+                    VisionModel = _currentVisionModel
                 };
                 var opt = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
                 File.WriteAllText(_currentScript.FilePath, System.Text.Json.JsonSerializer.Serialize(rec, opt));
@@ -521,7 +1095,9 @@ namespace WeChatAutomation.App
                     Name = name,
                     CreatedAt = DateTime.Now,
                     Actions = _steps.ToList(),
-                    Parameters = existingParams ?? new List<ScriptParameter>()
+                    Parameters = existingParams ?? new List<ScriptParameter>(),
+                    DefaultClickMode = _currentClickMode,
+                    VisionModel = _currentVisionModel
                 };
                 var opt = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
                 File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(rec, opt));
@@ -584,18 +1160,63 @@ namespace WeChatAutomation.App
         private void AppendLog(string msg) => Dispatcher.BeginInvoke(() => LogText.Text += $"[{DateTime.Now:HH:mm:ss}] {msg}\n");
         private void ClearLog_Click(object s, RoutedEventArgs e) => LogText.Text = "";
 
+        private void UpdateReadContentDisplay()
+        {
+            var last = _player.ReadResults.LastOrDefault();
+            if (last == null) return;
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"[{last.CapturedAt:HH:mm:ss}] {last.WindowTitle}");
+
+            if (last.Source == "RegexMatch")
+            {
+                sb.AppendLine("来源: 正则识别");
+                if (!string.IsNullOrEmpty(last.MatchedValue))
+                    sb.AppendLine($"匹配值: {last.MatchedValue}");
+                if (last.Matches.Count > 0)
+                {
+                    sb.AppendLine($"匹配数: {last.Matches.Count}");
+                    for (int i = 0; i < last.Matches.Count; i++)
+                    {
+                        var m = last.Matches[i];
+                        sb.AppendLine($"  [{i + 1}] {m.Value}");
+                        foreach (var g in m.Groups)
+                            sb.AppendLine($"      {g.Key}: {g.Value}");
+                    }
+                }
+                sb.AppendLine($"\n--- 原始内容 ---\n{last.Content}");
+            }
+            else
+            {
+                sb.AppendLine($"\n{last.Content}");
+            }
+
+            ReadContentText.Text = sb.ToString();
+        }
+
         // ═══ 阅读保存 ═══
         private void SaveReadContent_Click(object s, RoutedEventArgs e)
         {
-            var content = _player.ReadResults.LastOrDefault()?.Content;
-            if (string.IsNullOrEmpty(content)) { MessageBox.Show("没有可保存的内容"); return; }
+            var last = _player.ReadResults.LastOrDefault();
+            if (last == null || string.IsNullOrEmpty(last.Content)) { MessageBox.Show("没有可保存的内容"); return; }
+
+            var content = last.Source == "RegexMatch" && !string.IsNullOrEmpty(last.MatchedValue)
+                ? $"匹配值:\n{last.MatchedValue}\n\n--- 原始内容 ---\n{last.Content}"
+                : last.Content;
+
             var dlg = new Microsoft.Win32.SaveFileDialog { Title = "保存", Filter = "文本|*.txt|所有|*.*", FileName = $"阅读_{DateTime.Now:yyyyMMdd_HHmmss}.txt" };
             if (dlg.ShowDialog() == true) { File.WriteAllText(dlg.FileName, content, System.Text.Encoding.UTF8); AppendLog($"已保存: {dlg.FileName}"); }
         }
 
         private void CopyReadContent_Click(object s, RoutedEventArgs e)
         {
-            var content = _player.ReadResults.LastOrDefault()?.Content;
+            var last = _player.ReadResults.LastOrDefault();
+            if (last == null) { MessageBox.Show("没有可复制的内容"); return; }
+
+            var content = last.Source == "RegexMatch" && !string.IsNullOrEmpty(last.MatchedValue)
+                ? last.MatchedValue
+                : last.Content;
+
             if (string.IsNullOrEmpty(content)) { MessageBox.Show("没有可复制的内容"); return; }
             Clipboard.SetText(content); AppendLog("已复制");
         }
@@ -750,6 +1371,7 @@ namespace WeChatAutomation.App
                     ParameterName = param.Name,
                     DefaultValue = param.DefaultValue,
                     IsRequired = param.IsRequired,
+                    CopyToClipboard = param.CopyToClipboard,
                     Parameter = $"{{{param.Name}}}"
                 };
                 _recorder.AddManual(node);
@@ -765,7 +1387,7 @@ namespace WeChatAutomation.App
             {
                 Title = existing != null ? "编辑参数" : "添加输入参数",
                 Width = 400,
-                Height = 350,
+                Height = 430,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Owner = this,
                 ResizeMode = ResizeMode.NoResize
@@ -773,17 +1395,18 @@ namespace WeChatAutomation.App
 
             var sp = new StackPanel { Margin = new Thickness(15) };
 
-            // 参数名称
+            sp.Children.Add(new TextBlock { Text = "参数 ID (用于 HTTP/MQTT/MCP 传入):", Margin = new Thickness(0, 0, 0, 3) });
+            var idBox = new TextBox { Text = existing?.Id ?? Guid.NewGuid().ToString("N")[..8], Margin = new Thickness(0, 0, 0, 8), ToolTip = "自动生成，可通过此 ID 从外部传入参数值" };
+            sp.Children.Add(idBox);
+
             sp.Children.Add(new TextBlock { Text = "参数名称 (英文，用于占位符):", Margin = new Thickness(0, 0, 0, 3) });
             var nameBox = new TextBox { Text = existing?.Name ?? "", Margin = new Thickness(0, 0, 0, 8), ToolTip = "如: message, username" };
             sp.Children.Add(nameBox);
 
-            // 显示名称
             sp.Children.Add(new TextBlock { Text = "显示名称:", Margin = new Thickness(0, 0, 0, 3) });
             var displayNameBox = new TextBox { Text = existing?.DisplayName ?? "", Margin = new Thickness(0, 0, 0, 8) };
             sp.Children.Add(displayNameBox);
 
-            // 参数类型
             sp.Children.Add(new TextBlock { Text = "参数类型:", Margin = new Thickness(0, 0, 0, 3) });
             var typeCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8) };
             typeCombo.Items.Add("Text - 文本");
@@ -799,30 +1422,28 @@ namespace WeChatAutomation.App
             };
             sp.Children.Add(typeCombo);
 
-            // 默认值
             sp.Children.Add(new TextBlock { Text = "默认值:", Margin = new Thickness(0, 0, 0, 3) });
             var defaultBox = new TextBox { Text = existing?.DefaultValue ?? "", Margin = new Thickness(0, 0, 0, 8) };
             sp.Children.Add(defaultBox);
 
-            // 必填
-            var requiredBox = new CheckBox { Content = "必填", IsChecked = existing?.IsRequired ?? true, Margin = new Thickness(0, 0, 0, 8) };
+            var requiredBox = new CheckBox { Content = "必填", IsChecked = existing?.IsRequired ?? true, Margin = new Thickness(0, 0, 0, 4) };
             sp.Children.Add(requiredBox);
 
-            // 说明
+            var copyToClipboardBox = new CheckBox { Content = "复制到剪切板（执行时将参数值自动复制到剪切板）", IsChecked = existing?.CopyToClipboard ?? false, Margin = new Thickness(0, 0, 0, 8) };
+            sp.Children.Add(copyToClipboardBox);
+
             sp.Children.Add(new TextBlock { Text = "说明:", Margin = new Thickness(0, 0, 0, 3) });
             var descBox = new TextBox { Text = existing?.Description ?? "", Margin = new Thickness(0, 0, 0, 8) };
             sp.Children.Add(descBox);
 
-            // 使用示例
             sp.Children.Add(new TextBlock
             {
-                Text = "提示: 在步骤参数中使用 {参数名} 作为占位符",
+                Text = "提示: 在步骤参数中使用 {参数名} 作为占位符\n外部调用可通过参数 ID 或名称传入值",
                 Foreground = Brushes.Gray,
                 FontSize = 10,
                 Margin = new Thickness(0, 0, 0, 5)
             });
 
-            // 按钮
             var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
             var ok = new Button { Content = "确定", IsDefault = true, Padding = new Thickness(15, 5, 15, 5), FontWeight = FontWeights.Bold };
             var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(8, 0, 0, 0) };
@@ -841,12 +1462,17 @@ namespace WeChatAutomation.App
                     return;
                 }
 
-                // 验证参数名称只包含英文、数字、下划线
                 var paramName = nameBox.Text.Trim();
                 if (!System.Text.RegularExpressions.Regex.IsMatch(paramName, @"^[a-zA-Z_][a-zA-Z0-9_]*$"))
                 {
                     MessageBox.Show("参数名称只能包含英文字母、数字和下划线，且不能以数字开头");
                     return;
+                }
+
+                var paramId = idBox.Text.Trim();
+                if (string.IsNullOrWhiteSpace(paramId))
+                {
+                    paramId = Guid.NewGuid().ToString("N")[..8];
                 }
 
                 var typeStr = typeCombo.SelectedItem?.ToString() ?? "Text - 文本";
@@ -860,10 +1486,12 @@ namespace WeChatAutomation.App
 
                 result = new ScriptParameter
                 {
+                    Id = paramId,
                     Name = paramName,
                     DisplayName = displayNameBox.Text.Trim(),
                     DefaultValue = defaultBox.Text,
                     IsRequired = requiredBox.IsChecked == true,
+                    CopyToClipboard = copyToClipboardBox.IsChecked == true,
                     Description = descBox.Text,
                     Type = paramType
                 };
@@ -928,6 +1556,19 @@ namespace WeChatAutomation.App
                 if (!string.IsNullOrEmpty(action.Parameter))
                 {
                     var matches = System.Text.RegularExpressions.Regex.Matches(action.Parameter, @"\{(\w+)\}");
+                    foreach (System.Text.RegularExpressions.Match m in matches)
+                    {
+                        if (!placeholders.Contains(m.Groups[1].Value))
+                            placeholders.Add(m.Groups[1].Value);
+                    }
+                }
+                if (!string.IsNullOrEmpty(action.OutputParamName) && !placeholders.Contains(action.OutputParamName))
+                {
+                    placeholders.Add(action.OutputParamName);
+                }
+                if (!string.IsNullOrEmpty(action.WindowTitle))
+                {
+                    var matches = System.Text.RegularExpressions.Regex.Matches(action.WindowTitle, @"\{(\w+)\}");
                     foreach (System.Text.RegularExpressions.Match m in matches)
                     {
                         if (!placeholders.Contains(m.Groups[1].Value))
@@ -1030,7 +1671,8 @@ namespace WeChatAutomation.App
                     _ => "文本"
                 };
                 var required = p.IsRequired ? "必填" : "选填";
-                listbox.Items.Add($"[{typeStr}] {p.Name} ({p.DisplayName ?? p.Name}) = \"{p.DefaultValue}\" ({required})");
+                var clipboard = p.CopyToClipboard ? " [→剪切板]" : "";
+                listbox.Items.Add($"[{p.Id}] [{typeStr}] {p.Name} ({p.DisplayName ?? p.Name}) = \"{p.DefaultValue}\" ({required}){clipboard}");
             }
         }
 
@@ -1057,7 +1699,7 @@ namespace WeChatAutomation.App
                 // 标签
                 sp.Children.Add(new TextBlock
                 {
-                    Text = $"{param.DisplayName ?? param.Name}{(param.IsRequired ? " *" : "")}:",
+                    Text = $"{param.DisplayName ?? param.Name}{(param.IsRequired ? " *" : "")}{(param.CopyToClipboard ? " [→剪切板]" : "")}:",
                     Margin = new Thickness(0, 0, 0, 3),
                     FontWeight = param.IsRequired ? FontWeights.Bold : FontWeights.Normal
                 });
@@ -1207,11 +1849,31 @@ namespace WeChatAutomation.App
             }
             else
             {
-                await _player.Play(_steps.ToList());
+                if (_steps.Any(s => s.ClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision))
+                    _player.EnsureVisionModel(_currentVisionModel);
+                await _player.Play(_steps.ToList(), _currentVisionModel);
             }
 
             PlayBtn.IsEnabled = _steps.Count > 0;
             StopPlayBtn.IsEnabled = false;
+        }
+
+        // ═══ YOLO 训练向导 ═══
+
+        private void YoloWizardBtn_Click(object s, RoutedEventArgs e) => OpenYoloWizard();
+
+        private void OpenYoloWizard()
+        {
+            var wizard = new YoloTrainWizard(_yoloTrainer, _player)
+            {
+                Owner = this
+            };
+            wizard.ShowDialog();
+            if (wizard.DeployCompleted)
+            {
+                AppendLog("[YOLO] 模型已部署并加载，视觉模式可用");
+                YoloProgressText.Text = "已部署";
+            }
         }
     }
 

@@ -229,7 +229,8 @@ namespace WeChatAutomation.Core.Services
 
         public void Dispose()
         {
-            _cts?.Cancel();
+            // 可能被 App.OnExit 和 DI 容器各调用一次；Cancel 对已释放的 CTS 会抛 ObjectDisposedException
+            try { _cts?.Cancel(); } catch (ObjectDisposedException) { }
             _cts?.Dispose();
             _mqttClient?.Dispose();
         }

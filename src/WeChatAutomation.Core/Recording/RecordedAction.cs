@@ -20,7 +20,16 @@ namespace WeChatAutomation.Core.Recording
         Scroll,
         ReadContent,
         ScrollRead,
-        InputParam
+        InputParam,
+        RegexMatch
+    }
+
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public enum ClickMode
+    {
+        Coordinate,
+        UIAPath,
+        Vision
     }
 
     /// <summary>
@@ -41,6 +50,9 @@ namespace WeChatAutomation.Core.Recording
         public string? WindowTitle { get; set; } // 目标窗口标题
         public double X { get; set; }
         public double Y { get; set; }
+        public ClickMode ClickMode { get; set; } = ClickMode.Coordinate;
+        public string? VisionLabel { get; set; }
+        public float VisionConfThreshold { get; set; } = 0.3f;
 
         // 参数
         public string Parameter { get; set; } = "";
@@ -48,9 +60,14 @@ namespace WeChatAutomation.Core.Recording
         public int ScrollAmount { get; set; } = 3; // 滚动行数
 
         // 动态输入参数
-        public string? ParameterName { get; set; } // 参数名称，用于 {参数名} 占位符
-        public string? DefaultValue { get; set; } // 默认值
-        public bool IsRequired { get; set; } = true; // 是否必填
+        public string? ParameterName { get; set; }
+        public string? DefaultValue { get; set; }
+        public bool IsRequired { get; set; } = true;
+        public bool CopyToClipboard { get; set; }
+
+        public string? RegexPattern { get; set; }
+        public string? RegexGroup { get; set; }
+        public string? OutputParamName { get; set; }
 
         // 元数据
         public bool IsEnabled { get; set; } = true;
@@ -58,7 +75,11 @@ namespace WeChatAutomation.Core.Recording
 
         public string Summary => ActionType switch
         {
-            ActionType.Click => $"点击 {ElementName ?? ClassName ?? $"({X:F0},{Y:F0})"}",
+            ActionType.Click => ClickMode == ClickMode.Coordinate
+                ? $"点击坐标({X:F0},{Y:F0})"
+                : ClickMode == ClickMode.Vision
+                    ? $"视觉点击 {VisionLabel ?? "未知"}"
+                    : $"点击路径 {ElementName ?? ClassName ?? AutomationId ?? "未知"}",
             ActionType.TypeText => $"输入 \"{Trunc(Parameter, 20)}\"",
             ActionType.SendKeys => $"按键 {Parameter}",
             ActionType.Wait => $"等待 {Parameter}ms",
@@ -71,7 +92,8 @@ namespace WeChatAutomation.Core.Recording
             ActionType.Scroll => $"滚动 {ScrollAmount} 行",
             ActionType.ReadContent => "阅读窗口内容",
             ActionType.ScrollRead => $"滚动阅读 {ScrollAmount} 行",
-            ActionType.InputParam => $"输入参数 [{ParameterName ?? "未命名"}]",
+            ActionType.InputParam => $"输入参数 [{ParameterName ?? "未命名"}]{(CopyToClipboard ? " →剪切板" : "")}",
+            ActionType.RegexMatch => $"正则识别 {Trunc(RegexPattern ?? "", 20)}{(CopyToClipboard ? " →剪切板" : "")}{(!string.IsNullOrEmpty(OutputParamName) ? $" →{{{OutputParamName}}}" : "")}",
             _ => ActionType.ToString()
         };
 
@@ -102,6 +124,13 @@ namespace WeChatAutomation.Core.Recording
         public List<RecordedAction> Actions { get; set; } = new();
         public List<ReadContentResult> ReadResults { get; set; } = new();
         public List<ScriptParameter> Parameters { get; set; } = new();
+        public ClickMode DefaultClickMode { get; set; } = ClickMode.Coordinate;
+
+        /// <summary>
+        /// 视觉模式使用的 ONNX 模型文件名（位于运行目录 models/ 下，如 yolov8n-ui.onnx）。
+        /// 留空时回退到默认 yolov8n-ui.onnx。每个脚本绑定一个模型，保存后回放/调用复用。
+        /// </summary>
+        public string? VisionModel { get; set; }
     }
 
     /// <summary>
@@ -109,12 +138,14 @@ namespace WeChatAutomation.Core.Recording
     /// </summary>
     public class ScriptParameter
     {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
         public string Name { get; set; } = "";
         public string DisplayName { get; set; } = "";
         public string DefaultValue { get; set; } = "";
         public string Description { get; set; } = "";
         public bool IsRequired { get; set; } = true;
         public ParameterType Type { get; set; } = ParameterType.Text;
+        public bool CopyToClipboard { get; set; } = false;
     }
 
     [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -131,6 +162,15 @@ namespace WeChatAutomation.Core.Recording
         public string WindowTitle { get; set; } = "";
         public string Content { get; set; } = "";
         public DateTime CapturedAt { get; set; }
-        public string Source { get; set; } = ""; // "ReadContent" 或 "ScrollRead"
+        public string Source { get; set; } = "";
+        public List<RegexMatchItem> Matches { get; set; } = new();
+        public string MatchedValue { get; set; } = "";
+    }
+
+    public class RegexMatchItem
+    {
+        public string Value { get; set; } = "";
+        public int Index { get; set; }
+        public Dictionary<string, string> Groups { get; set; } = new();
     }
 }

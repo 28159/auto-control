@@ -10,6 +10,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <Product>WeChatAutomation</Product>
+    <Description>通用桌面自动化录制与回放工具</Description>
+    <Copyright>Copyright © 2025</Copyright>
   </PropertyGroup>
 
   <ItemGroup>
