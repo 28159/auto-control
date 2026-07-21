@@ -228,10 +228,12 @@
                     </Grid>
                 </Border>
 
-                <!-- ── 底部：日志 + 阅读 ── -->
-                <Grid Grid.Row="3" Margin="0,6,0,0" Height="120">
+                <!-- ── 底部：日志 + 任务列表 + 阅读 ── -->
+                <Grid Grid.Row="3" Margin="0,6,0,0" Height="140">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="5"/>
+                        <ColumnDefinition Width="280"/>
                         <ColumnDefinition Width="5"/>
                         <ColumnDefinition Width="280"/>
                     </Grid.ColumnDefinitions>
@@ -256,6 +258,43 @@
                     <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch"/>
 
                     <Border Grid.Column="2" Background="White" BorderBrush="#E0E0E0" BorderThickness="1" CornerRadius="5">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="6,3">
+                                <TextBlock Text="📋 任务列表" FontWeight="SemiBold" FontSize="11" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="TaskPollingCountText" Text="" FontSize="10" Foreground="#999" VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                <Button Content="刷新" Click="RefreshTaskHistory_Click" Padding="4,1" Margin="6,0,0,0" FontSize="10"/>
+                                <Button Content="清除" Click="ClearTaskHistory_Click" Padding="4,1" Margin="3,0,0,0" FontSize="10"/>
+                            </StackPanel>
+                            <ListBox Grid.Row="1" x:Name="TaskHistoryList" BorderThickness="0" FontSize="10"
+                                     SelectionChanged="TaskHistoryList_SelectionChanged" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="2,1">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="{Binding StatusIcon}" FontSize="11" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding DisplayText}" FontSize="10" TextTrimming="CharacterEllipsis"/>
+                                                <TextBlock Text="{Binding DetailText}" FontSize="9" Foreground="#999"/>
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="2" Text="{Binding DurationText}" FontSize="9" Foreground="#999" VerticalAlignment="Center"/>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
+                    </Border>
+
+                    <GridSplitter Grid.Column="3" Width="5" HorizontalAlignment="Stretch"/>
+
+                    <Border Grid.Column="4" Background="White" BorderBrush="#E0E0E0" BorderThickness="1" CornerRadius="5">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -309,6 +348,15 @@
                         <Ellipse x:Name="McpStatusDot" Width="8" Height="8" Fill="#ccc" Margin="0,0,4,0" VerticalAlignment="Center"/>
                         <TextBlock Text="MCP" FontSize="11" VerticalAlignment="Center" Margin="0,0,4,0"/>
                         <Button x:Name="McpToggleBtn" Content="开启" Click="McpToggle_Click" Padding="8,2" Margin="6,0,0,0" FontSize="10"/>
+                    </StackPanel>
+
+                    <!-- 轮询 -->
+                    <StackPanel Orientation="Horizontal" Margin="12,0,0,0">
+                        <Ellipse x:Name="TaskPollingStatusDot" Width="8" Height="8" Fill="#ccc" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="轮询" FontSize="11" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                        <TextBlock x:Name="TaskPollingStatusText" Text="" FontSize="10" Foreground="#999" VerticalAlignment="Center"/>
+                        <Button x:Name="TaskPollingToggleBtn" Content="开启" Click="TaskPollingToggle_Click" Padding="8,2" Margin="6,0,0,0" FontSize="10"/>
+                        <Button Content="⚙" Click="TaskPollingConfig_Click" Padding="4,2" Margin="3,0,0,0" FontSize="10" ToolTip="轮询服务配置"/>
                     </StackPanel>
                 </StackPanel>
 

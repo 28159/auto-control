@@ -397,3 +397,156 @@ http://<your-server>:<port>
 | 服务器不可达 | 轮询/心跳继续运行，不中断客户端 |
 | 微信断开 | 停止所有后台线程(监听/轮询/心跳/自动刷新) |
 | 任务认领失败 | 跳过该任务，不执行 |
+
+---
+
+## 九、客户端本地管理 API
+
+客户端自身也提供 HTTP API（默认端口 5000），用于本地管理和监控任务轮询服务。
+
+### 9.1 查看轮询服务状态
+
+### `GET /api/task-polling/status`
+
+**响应示例：**
+
+```json
+{
+  "enabled": true,
+  "running": true,
+  "executing": false,
+  "client_id": "wxauto-a1b2c3d4e5f6",
+  "server_url": "http://localhost:8080",
+  "current_task": null,
+  "cached_results": 0
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| enabled | bool | 服务是否已注册 |
+| running | bool | 轮询服务是否运行中 |
+| executing | bool | 是否正在执行任务 |
+| client_id | string | 客户端唯一标识 |
+| server_url | string | 远程服务器地址 |
+| current_task | object/null | 当前执行中的任务（task_id, task_type, description） |
+| cached_results | int | 缓存的未回传结果数 |
+
+### 9.2 启动轮询服务
+
+### `POST /api/task-polling/start`
+
+**响应示例：**
+
+```json
+{ "message": "任务轮询服务已启动" }
+```
+
+### 9.3 停止轮询服务
+
+### `POST /api/task-polling/stop`
+
+**响应示例：**
+
+```json
+{ "message": "任务轮询服务已停止" }
+```
+
+### 9.4 手动触发一次轮询
+
+### `POST /api/task-polling/trigger`
+
+立即执行一次"拉取 → 认领 → 执行 → 回传"周期，无需等待轮询间隔。
+
+**响应示例（有任务）：**
+
+```json
+{
+  "success": true,
+  "message": "执行完成",
+  "duration": 2.35
+}
+```
+
+**响应示例（无任务）：**
+
+```json
+{ "message": "当前无可执行任务" }
+```
+
+### 9.5 测试远程服务器连通性
+
+### `GET /api/task-polling/health-check`
+
+**响应示例：**
+
+```json
+{
+  "server_reachable": true,
+  "server_url": "http://localhost:8080"
+}
+```
+
+### 9.6 查看缓存的未回传结果
+
+### `GET /api/task-polling/cached-results`
+
+**响应示例：**
+
+```json
+{
+  "count": 1,
+  "items": [
+    {
+      "taskId": "a1b2c3d4",
+      "success": true,
+      "message": "执行完成",
+      "cachedAt": "2026-07-21T10:30:00",
+      "retryCount": 2
+    }
+  ]
+}
+```
+
+### 9.7 手动重传缓存结果
+
+### `POST /api/task-polling/flush-cache`
+
+尝试将所有缓存的结果回传到远程服务器。
+
+**响应示例：**
+
+```json
+{
+  "message": "已回传 1 条缓存结果",
+  "flushed": 1
+}
+```
+
+---
+
+## 十、任务轮询配置
+
+在 `appsettings.json` 中配置：
+
+```json
+{
+  "TaskPolling": {
+    "Enabled": false,
+    "ServerUrl": "http://localhost:8080",
+    "PollIntervalSeconds": 10,
+    "HeartbeatIntervalSeconds": 30,
+    "ClientId": ""
+  }
+}
+```
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| Enabled | bool | false | 是否自动启动轮询服务 |
+| ServerUrl | string | http://localhost:8080 | 远程服务器地址 |
+| PollIntervalSeconds | int | 10 | 轮询间隔（秒） |
+| HeartbeatIntervalSeconds | int | 30 | 心跳间隔（秒） |
+| ClientId | string | (自动生成) | 客户端标识，留空自动生成并持久化到 client_id.txt |
+
+> ClientId 首次启动自动生成格式 `wxauto-{12位hex}`，保存在程序目录下的 `client_id.txt` 文件中。

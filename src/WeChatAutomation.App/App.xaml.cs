@@ -17,6 +17,7 @@ public partial class App : Application
     public static HttpApiService HttpApi { get; private set; }
     public static MqttService Mqtt { get; private set; }
     public static McpServerService Mcp { get; set; }
+    public static TaskPollingService TaskPolling { get; private set; }
     public static IConfiguration Configuration { get; private set; }
 
     protected override void OnStartup(StartupEventArgs e)
@@ -36,6 +37,7 @@ public partial class App : Application
                 services.AddSingleton<HttpApiService>();
                 services.AddSingleton<MqttService>();
                 services.AddSingleton<McpServerService>();
+                services.AddSingleton<TaskPollingService>();
             })
             .Build();
 
@@ -49,6 +51,7 @@ public partial class App : Application
         ScriptExecutor = _host.Services.GetRequiredService<IScriptExecutor>();
         HttpApi = _host.Services.GetRequiredService<HttpApiService>();
         Mqtt = _host.Services.GetRequiredService<MqttService>();
+        TaskPolling = _host.Services.GetRequiredService<TaskPollingService>();
 
         // 根据配置决定是否启动各服务
         var httpEnabled = Configuration.GetValue("HttpApi:Enabled", false);
@@ -72,6 +75,13 @@ public partial class App : Application
             Mcp = _host.Services.GetRequiredService<McpServerService>();
             _ = Mcp.StartAsync(CancellationToken.None);
             _logger.Info("App", "MCP Server 已启动");
+        }
+
+        var taskPollingEnabled = Configuration.GetValue("TaskPolling:Enabled", false);
+        if (taskPollingEnabled)
+        {
+            _ = TaskPolling.StartAsync(CancellationToken.None);
+            _logger.Info("App", "任务轮询服务已启动");
         }
 
         _logger.Info("App", "应用已启动");
@@ -98,10 +108,12 @@ public partial class App : Application
             HttpApi?.StopAsync(CancellationToken.None).Wait(5000);
             Mqtt?.StopAsync(CancellationToken.None).Wait(5000);
             Mcp?.StopAsync(CancellationToken.None).Wait(5000);
+            TaskPolling?.StopAsync(CancellationToken.None).Wait(5000);
 
             HttpApi?.Dispose();
             Mqtt?.Dispose();
             Mcp?.Dispose();
+            TaskPolling?.Dispose();
             (ScriptExecutor as IDisposable)?.Dispose();
         }
         catch (Exception ex)

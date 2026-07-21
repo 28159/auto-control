@@ -9,6 +9,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using Microsoft.Extensions.Configuration;
 using FlaUIAutomation = FlaUI.Core.AutomationElements;
 using FlaUI.UIA3;
 using WeChatAutomation.Core.Native;
@@ -114,6 +115,11 @@ namespace WeChatAutomation.App
 
             // 初始化服务状态显示
             Dispatcher.BeginInvoke(() => UpdateServiceStatus(), System.Windows.Threading.DispatcherPriority.Background);
+
+            // 任务列表定时刷新
+            var taskRefreshTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            taskRefreshTimer.Tick += (_, _) => RefreshTaskHistory();
+            taskRefreshTimer.Start();
         }
 
         // ═══ 快捷键 ═══
@@ -1845,6 +1851,24 @@ namespace WeChatAutomation.App
                     McpToggleBtn.Background = new SolidColorBrush(Color.FromRgb(76, 175, 80)); // 绿色
                     McpToggleBtn.Foreground = Brushes.White;
                 }
+
+                // 任务轮询状态
+                if (App.TaskPolling?.IsRunning == true)
+                {
+                    TaskPollingStatusDot.Fill = new SolidColorBrush(Color.FromRgb(76, 175, 80)); // 绿色
+                    TaskPollingStatusText.Text = App.TaskPolling.IsExecuting ? "执行中" : "空闲";
+                    TaskPollingToggleBtn.Content = "关闭";
+                    TaskPollingToggleBtn.Background = new SolidColorBrush(Color.FromRgb(229, 57, 53)); // 红色
+                    TaskPollingToggleBtn.Foreground = Brushes.White;
+                }
+                else
+                {
+                    TaskPollingStatusDot.Fill = new SolidColorBrush(Color.FromRgb(204, 204, 204)); // 灰色
+                    TaskPollingStatusText.Text = "(未启动)";
+                    TaskPollingToggleBtn.Content = "开启";
+                    TaskPollingToggleBtn.Background = new SolidColorBrush(Color.FromRgb(76, 175, 80)); // 绿色
+                    TaskPollingToggleBtn.Foreground = Brushes.White;
+                }
             }
             catch (Exception ex)
             {
@@ -1919,6 +1943,300 @@ namespace WeChatAutomation.App
             {
                 AppendLog($"MCP Server 切换失败: {ex.Message}");
             }
+        }
+
+        private async void TaskPollingToggle_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                if (App.TaskPolling?.IsRunning == true)
+                {
+                    await App.TaskPolling.StopAsync(CancellationToken.None);
+                    AppendLog("任务轮询服务已关闭");
+                }
+                else
+                {
+                    await App.TaskPolling.StartManual(CancellationToken.None);
+                    if (App.TaskPolling.IsRunning)
+                        AppendLog("任务轮询服务已开启");
+                    else
+                        AppendLog("任务轮询服务启动失败，请检查 ServerUrl 配置");
+                }
+                UpdateServiceStatus();
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"任务轮询服务切换失败: {ex.Message}");
+            }
+        }
+
+        private void TaskPollingConfig_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                var config = App.Configuration;
+                var currentUrl = config.GetValue("TaskPolling:ServerUrl", "http://localhost:6621");
+                var currentPoll = config.GetValue("TaskPolling:PollIntervalSeconds", 10);
+                var currentHeartbeat = config.GetValue("TaskPolling:HeartbeatIntervalSeconds", 30);
+                var currentClientId = App.TaskPolling?.ClientId ?? config.GetValue("TaskPolling:ClientId", "");
+
+                var w = new Window
+                {
+                    Title = "任务轮询配置",
+                    Width = 420, SizeToContent = SizeToContent.Height,
+                    WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                    Owner = this, ResizeMode = ResizeMode.NoResize
+                };
+
+                var sp = new StackPanel { Margin = new Thickness(15) };
+
+                // 服务器地址
+                sp.Children.Add(new TextBlock { Text = "远程服务器地址:", Margin = new Thickness(0, 0, 0, 3) });
+                var serverUrlBox = new TextBox { Text = currentUrl, Margin = new Thickness(0, 0, 0, 8), ToolTip = "远程任务服务器 Base URL" };
+                sp.Children.Add(serverUrlBox);
+
+                // 轮询间隔
+                var pollPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+                pollPanel.Children.Add(new TextBlock { Text = "轮询间隔(秒):", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+                var pollBox = new TextBox { Text = currentPoll.ToString(), Width = 60 };
+                pollPanel.Children.Add(pollBox);
+                pollPanel.Children.Add(new TextBlock { Text = "心跳间隔(秒):", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(15, 0, 5, 0) });
+                var heartbeatBox = new TextBox { Text = currentHeartbeat.ToString(), Width = 60 };
+                pollPanel.Children.Add(heartbeatBox);
+                sp.Children.Add(pollPanel);
+
+                // Client ID
+                sp.Children.Add(new TextBlock { Text = "Client ID:", Margin = new Thickness(0, 0, 0, 3) });
+                var clientIdBox = new TextBox { Text = currentClientId, Margin = new Thickness(0, 0, 0, 3), ToolTip = "客户端唯一标识，留空自动生成" };
+                sp.Children.Add(clientIdBox);
+                sp.Children.Add(new TextBlock { Text = "留空自动生成并持久化到 client_id.txt", FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 8) });
+
+                // 当前状态
+                if (App.TaskPolling?.IsRunning == true)
+                {
+                    sp.Children.Add(new Separator { Margin = new Thickness(0, 0, 0, 8) });
+                    sp.Children.Add(new TextBlock
+                    {
+                        Text = $"当前状态: 运行中 → {App.TaskPolling.ServerUrl}\n已执行: ✅{App.TaskPolling.TotalCompleted} ❌{App.TaskPolling.TotalFailed}  缓存: {App.TaskPolling.CachedResultCount}条",
+                        FontSize = 11, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 8)
+                    });
+                }
+
+                // 按钮
+                var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+                var ok = new Button { Content = "保存并重启", IsDefault = true, Padding = new Thickness(12, 5, 12, 5), FontWeight = FontWeights.Bold };
+                var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(8, 0, 0, 0) };
+                bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
+
+                w.Content = sp;
+
+                ok.Click += async (_, _) =>
+                {
+                    var newUrl = serverUrlBox.Text.Trim();
+                    if (string.IsNullOrWhiteSpace(newUrl)) { MessageBox.Show("服务器地址不能为空"); return; }
+
+                    // 写入 appsettings.json
+                    try
+                    {
+                        var configPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json");
+                        string json;
+                        if (System.IO.File.Exists(configPath))
+                            json = System.IO.File.ReadAllText(configPath);
+                        else
+                            json = "{}";
+
+                        var doc = System.Text.Json.JsonDocument.Parse(json);
+                        using var stream = new System.IO.MemoryStream();
+                        using var writer = new System.Text.Json.Utf8JsonWriter(stream, new System.Text.Json.JsonWriterOptions { Indented = true });
+
+                        writer.WriteStartObject();
+                        foreach (var prop in doc.RootElement.EnumerateObject())
+                        {
+                            if (prop.Name == "TaskPolling")
+                            {
+                                writer.WritePropertyName("TaskPolling");
+                                writer.WriteStartObject();
+                                writer.WriteBoolean("Enabled", true);
+                                writer.WriteString("ServerUrl", newUrl);
+                                if (int.TryParse(pollBox.Text, out int pi)) writer.WriteNumber("PollIntervalSeconds", pi);
+                                if (int.TryParse(heartbeatBox.Text, out int hi)) writer.WriteNumber("HeartbeatIntervalSeconds", hi);
+                                var cid = clientIdBox.Text.Trim();
+                                if (!string.IsNullOrEmpty(cid)) writer.WriteString("ClientId", cid);
+                                writer.WriteEndObject();
+                            }
+                            else
+                            {
+                                prop.WriteTo(writer);
+                            }
+                        }
+                        // 如果原来没有 TaskPolling 节
+                        if (!doc.RootElement.TryGetProperty("TaskPolling", out _))
+                        {
+                            writer.WritePropertyName("TaskPolling");
+                            writer.WriteStartObject();
+                            writer.WriteBoolean("Enabled", true);
+                            writer.WriteString("ServerUrl", newUrl);
+                            if (int.TryParse(pollBox.Text, out int pi)) writer.WriteNumber("PollIntervalSeconds", pi);
+                            if (int.TryParse(heartbeatBox.Text, out int hi)) writer.WriteNumber("HeartbeatIntervalSeconds", hi);
+                            writer.WriteEndObject();
+                        }
+                        writer.WriteEndObject();
+                        writer.Flush();
+
+                        json = System.Text.Encoding.UTF8.GetString(stream.ToArray());
+                        System.IO.File.WriteAllText(configPath, json);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"保存配置失败: {ex.Message}");
+                        return;
+                    }
+
+                    // 重启轮询服务
+                    if (App.TaskPolling?.IsRunning == true)
+                    {
+                        await App.TaskPolling.StopAsync(CancellationToken.None);
+                    }
+
+                    // 重新加载配置
+                    ((IConfigurationRoot)App.Configuration).Reload();
+                    await App.TaskPolling.StartManual(CancellationToken.None);
+
+                    w.DialogResult = true;
+                };
+
+                if (w.ShowDialog() == true)
+                {
+                    UpdateServiceStatus();
+                    AppendLog($"任务轮询配置已更新 → {serverUrlBox.Text.Trim()}");
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"配置编辑失败: {ex.Message}");
+            }
+        }
+
+        // ═══ 任务列表 ═══
+
+        private readonly ObservableCollection<TaskHistoryDisplayItem> _taskHistoryItems = new();
+
+        private void RefreshTaskHistory_Click(object s, RoutedEventArgs e) => RefreshTaskHistory();
+
+        private void ClearTaskHistory_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                App.TaskPolling?.ClearHistory();
+                _taskHistoryItems.Clear();
+                TaskPollingCountText.Text = "";
+                AppendLog("任务历史已清除");
+            }
+            catch (Exception ex) { AppendLog($"清除任务历史失败: {ex.Message}"); }
+        }
+
+        private void TaskHistoryList_SelectionChanged(object s, SelectionChangedEventArgs e)
+        {
+            if (TaskHistoryList.SelectedItem is TaskHistoryDisplayItem item)
+                ShowTaskDetail(item);
+        }
+
+        public void RefreshTaskHistory()
+        {
+            try
+            {
+                var polling = App.TaskPolling;
+                if (polling == null) return;
+
+                var history = polling.TaskHistory.ToList();
+                _taskHistoryItems.Clear();
+
+                // 按时间倒序（最新的在最上面）
+                foreach (var h in history.OrderByDescending(h => h.StartedAt))
+                {
+                    _taskHistoryItems.Add(new TaskHistoryDisplayItem
+                    {
+                        TaskId = h.TaskId,
+                        TaskType = h.TaskType,
+                        Description = h.Description ?? h.TaskType,
+                        Status = h.Status,
+                        Message = h.Message ?? "",
+                        Duration = h.Duration,
+                        StartedAt = h.StartedAt,
+                        FinishedAt = h.FinishedAt,
+                        Params = h.Params,
+                        StatusIcon = h.Status switch
+                        {
+                            "running" => "🔄",
+                            "completed" => "✅",
+                            "failed" => "❌",
+                            _ => "⏳"
+                        },
+                        DisplayText = !string.IsNullOrEmpty(h.Description) ? h.Description : $"{h.TaskType} ({(h.TaskId != null && h.TaskId.Length >= 8 ? h.TaskId[..8] : h.TaskId ?? "")})",
+                        DetailText = h.Status == "running" ? "执行中..." :
+                                     h.FinishedAt.HasValue ? $"{h.Status} · {h.StartedAt:HH:mm:ss}" :
+                                     $"{h.Status} · {h.StartedAt:HH:mm:ss}",
+                        DurationText = h.Duration > 0 ? $"{h.Duration:F1}s" : ""
+                    });
+                }
+
+                TaskHistoryList.ItemsSource = _taskHistoryItems;
+                var completed = polling.TotalCompleted;
+                var failed = polling.TotalFailed;
+                TaskPollingCountText.Text = history.Count > 0 ? $"✅{completed} ❌{failed}" : "";
+            }
+            catch { }
+        }
+
+        private void ShowTaskDetail(TaskHistoryDisplayItem item)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"任务ID: {item.TaskId}");
+            sb.AppendLine($"类型: {item.TaskType}");
+            sb.AppendLine($"状态: {item.Status}");
+            if (!string.IsNullOrEmpty(item.Description))
+                sb.AppendLine($"描述: {item.Description}");
+            sb.AppendLine($"开始: {item.StartedAt:yyyy-MM-dd HH:mm:ss}");
+            if (item.FinishedAt.HasValue)
+                sb.AppendLine($"完成: {item.FinishedAt:yyyy-MM-dd HH:mm:ss}");
+            if (item.Duration > 0)
+                sb.AppendLine($"耗时: {item.Duration:F2}s");
+            if (!string.IsNullOrEmpty(item.Message))
+                sb.AppendLine($"消息: {item.Message}");
+            if (item.Params?.Count > 0)
+            {
+                sb.AppendLine("参数:");
+                foreach (var kvp in item.Params)
+                    sb.AppendLine($"  {kvp.Key}: {kvp.Value}");
+            }
+
+            var w = new Window
+            {
+                Title = $"任务详情 - {item.TaskId}",
+                Width = 400, SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this, ResizeMode = ResizeMode.NoResize
+            };
+            var sp = new StackPanel { Margin = new Thickness(15) };
+            sp.Children.Add(new TextBlock
+            {
+                Text = sb.ToString().TrimEnd(),
+                FontFamily = new FontFamily("Consolas"),
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap
+            });
+            var closeBtn = new Button
+            {
+                Content = "关闭",
+                IsCancel = true,
+                Padding = new Thickness(15, 5, 15, 5),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            closeBtn.Click += (_, _) => w.Close();
+            sp.Children.Add(closeBtn);
+            w.Content = sp;
+            w.ShowDialog();
         }
 
         // ═══ 动态参数管理 ═══
@@ -2594,4 +2912,21 @@ namespace WeChatAutomation.App
     }
 
     public class ScriptInfo { public string FilePath { get; set; } public string Name { get; set; } public int StepCount { get; set; } public DateTime LastModified { get; set; } }
+
+    public class TaskHistoryDisplayItem
+    {
+        public string TaskId { get; set; }
+        public string TaskType { get; set; }
+        public string Description { get; set; }
+        public string Status { get; set; }
+        public string Message { get; set; }
+        public double Duration { get; set; }
+        public DateTime StartedAt { get; set; }
+        public DateTime? FinishedAt { get; set; }
+        public Dictionary<string, object> Params { get; set; }
+        public string StatusIcon { get; set; }
+        public string DisplayText { get; set; }
+        public string DetailText { get; set; }
+        public string DurationText { get; set; }
+    }
 }
