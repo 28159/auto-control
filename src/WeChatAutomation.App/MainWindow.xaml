@@ -33,7 +33,7 @@
 
                     <WrapPanel Grid.Row="1" Margin="0,0,0,6">
                         <Button Content="新建" Click="NewScript_Click" Padding="8,3" Margin="0,0,3,0" FontSize="11"/>
-                        <Button Content="重命名" Click="RenameScript_Click" Padding="8,3" Margin="0,0,3,0" FontSize="11"/>
+                        <Button Content="编辑" Click="EditScriptInfo_Click" Padding="8,3" Margin="0,0,3,0" FontSize="11"/>
                         <Button Content="删除" Click="DeleteScript_Click" Padding="8,3" FontSize="11" Foreground="Red"/>
                         <Button Content="导出" Click="ExportScript_Click" Padding="8,3" Margin="0,0,3,0" FontSize="11"/>
                         <Button Content="导入" Click="ImportScript_Click" Padding="8,3" FontSize="11"/>
@@ -85,7 +85,7 @@
                     </StackPanel>
 
                     <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                        <TextBlock Text="F9 录制  F10 确认  F11 回放" Foreground="#999" FontSize="11" VerticalAlignment="Center"/>
+                        <TextBlock Text="F9 录制  F10 确认  F11 回放  F12 检查" Foreground="#999" FontSize="11" VerticalAlignment="Center"/>
                     </StackPanel>
 
                     <StackPanel Grid.Column="2" Orientation="Horizontal">
@@ -138,6 +138,8 @@
 
                         <StackPanel Grid.Column="2" Orientation="Horizontal">
                             <Button Content="⚙ 参数" Click="ManageParams_Click" Padding="10,6" Margin="0,0,3,0"/>
+                            <Button x:Name="InspectBtn" Content="🔍 检查" Click="InspectBtn_Click" Padding="10,6" Margin="0,0,3,0"
+                                    Background="#7B1FA2" Foreground="White" FontWeight="Bold" ToolTip="F12 窗口检查模式 - 鼠标悬停查看窗口信息"/>
                             <Button Content="💾 保存" Click="SaveBtn_Click" Padding="10,6" Margin="0,0,3,0"/>
                             <Button x:Name="PlayBtn" Content="▶ 回放" Click="PlayBtn_Click" Padding="10,6"
                                     Background="#4CAF50" Foreground="White" IsEnabled="False" Margin="0,0,3,0"/>

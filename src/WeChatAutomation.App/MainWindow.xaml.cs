@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using FlaUIAutomation = FlaUI.Core.AutomationElements;
 using FlaUI.UIA3;
 using WeChatAutomation.Core.Native;
@@ -106,7 +108,7 @@ namespace WeChatAutomation.App
             });
 
             LoadScriptsList();
-            AppendLog("F9录制 F10确认 F11回放 | 双击步骤可编辑");
+            AppendLog("F9录制 F10确认 F11回放 F12检查 | 双击步骤可编辑");
             UpdateClickModeUI();
             UpdateVisionModelUI();
 
@@ -115,11 +117,13 @@ namespace WeChatAutomation.App
         }
 
         // ═══ 快捷键 ═══
+        private bool _isInspecting = false; // 窗口检查模式状态
         private void OnHotKey(int vk)
         {
             if (vk == User32.VK_F9) { if (_recorder.IsRecording) StopRecording(); else StartRecording(); }
             else if (vk == User32.VK_F10) _recorder.ConfirmStep();
             else if (vk == User32.VK_F11) { if (_player.IsPlaying) _player.Stop(); else _ = PlayAll(); }
+            else if (vk == User32.VK_F12) { if (_isInspecting) StopInspect(); else StartInspect(); }
         }
 
         // ═══ 录制 ═══
@@ -128,6 +132,7 @@ namespace WeChatAutomation.App
         private void StartRecording()
         {
             if (_recorder.IsRecording) return;
+            _player.SetTargetWindow(IntPtr.Zero); // 开始录制时清除之前的阅读目标
             _recorder.CurrentClickMode = _currentClickMode;
             _recorder.CaptureTrainingData = CaptureTrainingCheck.IsChecked == true;
             _recorder.Start(RecordMode.Continuous);
@@ -619,7 +624,7 @@ namespace WeChatAutomation.App
             return result;
         }
 
-        private string ExtractTestContent(FlaUIAutomation.AutomationElement element, int depth = 0, int maxDepth = 5)
+        private string ExtractTestContent(FlaUIAutomation.AutomationElement element, int depth = 0, int maxDepth = 10)
         {
             if (depth > maxDepth || element == null) return "";
             var texts = new List<string>();
@@ -635,6 +640,21 @@ namespace WeChatAutomation.App
                     {
                         string val = valuePattern.Value.Value ?? "";
                         if (!string.IsNullOrWhiteSpace(val) && val != name) texts.Add(val);
+                    }
+                }
+                catch { }
+                // TextPattern 用于富文本控件（聊天消息等）
+                try
+                {
+                    var textPattern = element.Patterns.Text.PatternOrDefault;
+                    if (textPattern != null)
+                    {
+                        var documentRange = textPattern.DocumentRange;
+                        if (documentRange != null)
+                        {
+                            string text = documentRange.GetText(int.MaxValue);
+                            if (!string.IsNullOrWhiteSpace(text) && text != name) texts.Add(text);
+                        }
                     }
                 }
                 catch { }
@@ -712,7 +732,7 @@ namespace WeChatAutomation.App
             var w = new Window
             {
                 Title = $"编辑步骤 #{node.Order}",
-                Width = 400, Height = 360,
+                Width = 400, SizeToContent = SizeToContent.Height,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Owner = this, ResizeMode = ResizeMode.NoResize
             };
@@ -995,20 +1015,130 @@ namespace WeChatAutomation.App
             LoadScriptsList(); ScriptsListBox.SelectedItem = _scripts.FirstOrDefault(x => x.Name == name);
         }
 
-        private void RenameScript_Click(object s, RoutedEventArgs e)
+        private void EditScriptInfo_Click(object s, RoutedEventArgs e)
         {
             if (ScriptsListBox.SelectedItem is not ScriptInfo script) { MessageBox.Show("请先选择脚本"); return; }
-            var newName = ShowInput("重命名", "新名称:", script.Name);
-            if (string.IsNullOrWhiteSpace(newName) || newName == script.Name) return;
-            if (!IsValidScriptName(newName)) { MessageBox.Show("名称包含非法字符"); return; }
-            var newPath = Path.Combine(_scriptsDir, $"{newName}.json");
-            if (File.Exists(newPath)) { MessageBox.Show("已存在同名脚本"); return; }
-            File.Move(script.FilePath, newPath);
-            try { var rec = ActionRecorder.LoadFromFile(newPath); rec.Name = newName;
-                var opt = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
-                File.WriteAllText(newPath, System.Text.Json.JsonSerializer.Serialize(rec, opt)); }
-            catch (Exception ex) { AppendLog($"重命名保存失败: {ex.Message}"); }
-            LoadScriptsList();
+
+            try
+            {
+                var rec = ActionRecorder.LoadFromFile(script.FilePath);
+                if (rec == null) { MessageBox.Show("无法加载脚本"); return; }
+
+                var w = new Window
+                {
+                    Title = $"编辑脚本 - {rec.Name}",
+                    Width = 450, SizeToContent = SizeToContent.Height,
+                    WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                    Owner = this, ResizeMode = ResizeMode.NoResize
+                };
+
+                var sp = new StackPanel { Margin = new Thickness(15) };
+
+                // 名称
+                sp.Children.Add(new TextBlock { Text = "名称:", Margin = new Thickness(0, 0, 0, 3) });
+                var nameBox = new TextBox { Text = rec.Name, Margin = new Thickness(0, 0, 0, 8) };
+                sp.Children.Add(nameBox);
+
+                // 描述
+                sp.Children.Add(new TextBlock { Text = "描述:", Margin = new Thickness(0, 0, 0, 3) });
+                var descBox = new TextBox
+                {
+                    Text = rec.Description ?? "",
+                    Margin = new Thickness(0, 0, 0, 8),
+                    TextWrapping = TextWrapping.Wrap,
+                    AcceptsReturn = true,
+                    MaxHeight = 80,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+                };
+                sp.Children.Add(descBox);
+
+                // 默认点击模式
+                var clickModePanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+                clickModePanel.Children.Add(new TextBlock { Text = "默认点击模式:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+                var clickModeCombo = new ComboBox { Width = 120 };
+                clickModeCombo.Items.Add("Coordinate");
+                clickModeCombo.Items.Add("UIAPath");
+                clickModeCombo.Items.Add("Vision");
+                clickModeCombo.SelectedItem = rec.DefaultClickMode.ToString();
+                clickModePanel.Children.Add(clickModeCombo);
+                sp.Children.Add(clickModePanel);
+
+                // 视觉模型
+                sp.Children.Add(new TextBlock { Text = "视觉模型:", Margin = new Thickness(0, 0, 0, 3) });
+                var visionModelBox = new TextBox
+                {
+                    Text = rec.VisionModel ?? "",
+                    Margin = new Thickness(0, 0, 0, 8),
+                    ToolTip = "ONNX 模型文件名（位于 models 目录），留空使用默认"
+                };
+                sp.Children.Add(visionModelBox);
+
+                // 统计信息（只读）
+                sp.Children.Add(new Separator { Margin = new Thickness(0, 0, 0, 8) });
+                var infoText = new TextBlock
+                {
+                    Foreground = Brushes.Gray,
+                    FontSize = 11,
+                    Margin = new Thickness(0, 0, 0, 8),
+                    Text = $"步骤数: {rec.Actions?.Count ?? 0}  |  参数数: {rec.Parameters?.Count ?? 0}  |  创建: {rec.CreatedAt:yyyy-MM-dd HH:mm}"
+                };
+                sp.Children.Add(infoText);
+
+                // 按钮
+                var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+                var ok = new Button { Content = "保存", IsDefault = true, Padding = new Thickness(15, 5, 15, 5), FontWeight = FontWeights.Bold };
+                var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(8, 0, 0, 0) };
+                bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
+
+                w.Content = sp;
+
+                ok.Click += (_, _) =>
+                {
+                    var newName = nameBox.Text.Trim();
+                    if (string.IsNullOrWhiteSpace(newName)) { MessageBox.Show("名称不能为空"); return; }
+                    if (!IsValidScriptName(newName)) { MessageBox.Show("名称包含非法字符"); return; }
+
+                    // 检查重名（排除自身）
+                    if (newName != rec.Name)
+                    {
+                        var newPath = Path.Combine(_scriptsDir, $"{newName}.json");
+                        if (File.Exists(newPath)) { MessageBox.Show("已存在同名脚本"); return; }
+                    }
+
+                    rec.Name = newName;
+                    rec.Description = descBox.Text;
+                    if (Enum.TryParse<WeChatAutomation.Core.Recording.ClickMode>(clickModeCombo.SelectedItem?.ToString(), out var cm))
+                        rec.DefaultClickMode = cm;
+                    rec.VisionModel = string.IsNullOrWhiteSpace(visionModelBox.Text.Trim()) ? null : visionModelBox.Text.Trim();
+
+                    // 如果改名了，需要移动文件
+                    if (newName != script.Name)
+                    {
+                        var oldPath = script.FilePath;
+                        var newPath = Path.Combine(_scriptsDir, $"{newName}.json");
+                        var opt = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
+                        File.WriteAllText(newPath, System.Text.Json.JsonSerializer.Serialize(rec, opt));
+                        if (oldPath != newPath) File.Delete(oldPath);
+                    }
+                    else
+                    {
+                        var opt = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
+                        File.WriteAllText(script.FilePath, System.Text.Json.JsonSerializer.Serialize(rec, opt));
+                    }
+
+                    w.DialogResult = true;
+                };
+
+                if (w.ShowDialog() == true)
+                {
+                    LoadScriptsList();
+                    AppendLog($"已编辑脚本: {nameBox.Text.Trim()}");
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"编辑失败: {ex.Message}");
+            }
         }
 
         private void DeleteScript_Click(object s, RoutedEventArgs e)
@@ -1127,35 +1257,447 @@ namespace WeChatAutomation.App
             }
         }
 
-        // ═══ 选择窗口 ═══
+        // ═══ 选择窗口（支持悬停预览） ═══
         private bool PickTargetWindow(string message)
         {
-            var tip = new Window
+            // 创建浮动提示标签（跟随鼠标显示元素信息）
+            var hoverTip = new Window
             {
-                Title = "选择窗口", Width = 320, Height = 70,
-                WindowStyle = WindowStyle.ToolWindow, Topmost = true, ShowInTaskbar = false,
-                WindowStartupLocation = WindowStartupLocation.CenterScreen,
-                Background = new SolidColorBrush(Color.FromRgb(33, 150, 243)), Foreground = Brushes.White
+                Title = "", Width = 380, Height = Double.NaN, // Height auto
+                WindowStyle = WindowStyle.None, AllowsTransparency = true,
+                Background = new SolidColorBrush(Color.FromArgb(230, 30, 30, 30)),
+                Foreground = Brushes.White, ShowInTaskbar = false, Topmost = true,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                IsHitTestVisible = false, Focusable = false,
+                Padding = new Thickness(0)
             };
-            tip.Content = new TextBlock { Text = message, FontSize = 13, FontWeight = FontWeights.Bold,
-                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
+            var tipText = new TextBlock
+            {
+                Foreground = Brushes.White, FontSize = 11, FontFamily = new FontFamily("Consolas"),
+                Margin = new Thickness(8, 5, 8, 5), TextWrapping = TextWrapping.Wrap,
+                Text = "移动鼠标到目标区域，点击选中\n按 Esc 取消"
+            };
+            hoverTip.Content = tipText;
+
+            // 创建顶部提示条
+            var topBar = new Window
+            {
+                Title = "选择目标区域", Width = 500, Height = 50,
+                WindowStyle = WindowStyle.None, AllowsTransparency = true,
+                Background = new SolidColorBrush(Color.FromArgb(240, 33, 150, 243)),
+                Foreground = Brushes.White, ShowInTaskbar = false, Topmost = true,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                IsHitTestVisible = false, Focusable = false
+            };
+            topBar.Content = new TextBlock
+            {
+                Text = "🔍 移动鼠标查看元素信息，点击选中目标区域，Esc 取消",
+                FontSize = 13, FontWeight = FontWeights.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+            };
 
             this.WindowState = WindowState.Minimized;
-            IntPtr captured = IntPtr.Zero;
-            var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
-            timer.Tick += (_, _) => { timer.Stop(); captured = User32.GetForegroundWindow(); tip.Close(); };
-            tip.Loaded += (_, _) => timer.Start();
-            tip.ShowDialog();
+
+            IntPtr capturedHwnd = IntPtr.Zero;
+            FlaUI.Core.AutomationElements.AutomationElement capturedElement = null;
+            bool clickCaptured = false;
+            var uia = new FlaUI.UIA3.UIA3Automation();
+
+            // 使用 DispatcherFrame 嵌套消息循环，避免阻塞 UI 线程
+            var frame = new DispatcherFrame();
+
+            // 全局鼠标钩子 — 同时监听移动和点击
+            IntPtr hookId = IntPtr.Zero;
+            User32.LowLevelMouseProc hookProc = (int nCode, IntPtr wParam, IntPtr lParam) =>
+            {
+                if (nCode >= 0)
+                {
+                    int msg = (int)wParam;
+                    var st = Marshal.PtrToStructure<User32.MSLLHOOKSTRUCT>(lParam);
+                    int x = st.pt.x, y = st.pt.y;
+
+                    if (msg == User32.WM_MOUSEMOVE && !clickCaptured)
+                    {
+                        // 悬停预览：获取鼠标位置的 UIA 元素信息
+                        try
+                        {
+                            var element = uia.FromPoint(new System.Drawing.Point(x, y));
+                            if (element != null)
+                            {
+                                string ct = "";
+                                try { ct = element.ControlType.ToString(); } catch { }
+                                string name = "";
+                                try { name = element.Name ?? ""; } catch { }
+                                string cls = "";
+                                try { cls = element.ClassName ?? ""; } catch { }
+                                string autoId = "";
+                                try { autoId = element.AutomationId ?? ""; } catch { }
+
+                                var sb = new System.Text.StringBuilder();
+                                sb.AppendLine($"类型: {ct}");
+                                if (!string.IsNullOrEmpty(name))
+                                    sb.AppendLine($"名称: {(name.Length > 40 ? name[..40] + "..." : name)}");
+                                if (!string.IsNullOrEmpty(cls))
+                                    sb.AppendLine($"类名: {cls}");
+                                if (!string.IsNullOrEmpty(autoId))
+                                    sb.AppendLine($"ID: {autoId}");
+
+                                // 在 UI 线程更新悬停提示
+                                string tipContent = sb.ToString().TrimEnd();
+                                Dispatcher.BeginInvoke(new Action(() =>
+                                {
+                                    tipText.Text = tipContent;
+                                    // 定位提示窗口在鼠标右下方
+                                    hoverTip.Left = x + 20;
+                                    hoverTip.Top = y + 20;
+                                    // 防止超出屏幕
+                                    if (hoverTip.Left + 400 > SystemParameters.PrimaryScreenWidth)
+                                        hoverTip.Left = x - 400;
+                                    if (hoverTip.Top + 150 > SystemParameters.PrimaryScreenHeight)
+                                        hoverTip.Top = y - 150;
+                                }));
+                            }
+                        }
+                        catch { }
+                    }
+                    else if (msg == User32.WM_LBUTTONDOWN && !clickCaptured)
+                    {
+                        // 点击选中
+                        try
+                        {
+                            var element = uia.FromPoint(new System.Drawing.Point(x, y));
+                            if (element == null) goto next;
+
+                            // 排除自身窗口
+                            IntPtr hwnd = User32.WindowFromPoint(new User32.POINT { x = x, y = y });
+                            User32.GetWindowThreadProcessId(hwnd, out int pid);
+                            if (pid == System.Diagnostics.Process.GetCurrentProcess().Id) goto next;
+
+                            IntPtr topLevelHwnd = User32.GetAncestor(hwnd, User32.GA_ROOT);
+                            if (topLevelHwnd == IntPtr.Zero) topLevelHwnd = hwnd;
+
+                            capturedHwnd = topLevelHwnd;
+                            capturedElement = element;
+                            clickCaptured = true;
+
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                if (hookId != IntPtr.Zero) { User32.UnhookWindowsHookEx(hookId); hookId = IntPtr.Zero; }
+                                hoverTip.Close();
+                                topBar.Close();
+                            }));
+                        }
+                        catch { }
+                    next:;
+                    }
+                }
+                return User32.CallNextHookEx(hookId, nCode, wParam, lParam);
+            };
+
+            // 安装全局鼠标钩子
+            using (var cur = System.Diagnostics.Process.GetCurrentProcess())
+            using (var mod = cur.MainModule)
+            {
+                hookId = User32.SetWindowsHookEx(User32.WH_MOUSE_LL, hookProc,
+                    User32.GetModuleHandle(mod!.ModuleName), 0);
+            }
+
+            // Esc 键取消
+            var escHandler = new KeyEventHandler((s, e) =>
+            {
+                if (e.Key == Key.Escape && !clickCaptured)
+                {
+                    clickCaptured = true;
+                    if (hookId != IntPtr.Zero) { User32.UnhookWindowsHookEx(hookId); hookId = IntPtr.Zero; }
+                    hoverTip.Close();
+                    topBar.Close();
+                }
+            });
+            this.KeyDown += escHandler;
+
+            // 显示悬停提示和顶部提示
+            hoverTip.Show();
+            topBar.Show();
+
+            // 15 秒超时
+            var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
+                if (!clickCaptured)
+                {
+                    clickCaptured = true;
+                    if (hookId != IntPtr.Zero) { User32.UnhookWindowsHookEx(hookId); hookId = IntPtr.Zero; }
+                    hoverTip.Close();
+                    topBar.Close();
+                }
+            };
+            timer.Start();
+
+            // 窗口关闭时退出嵌套消息循环
+            hoverTip.Closed += (_, _) =>
+            {
+                timer.Stop();
+                this.KeyDown -= escHandler;
+                frame.Continue = false; // 退出 Dispatcher.Push 嵌套循环
+            };
+
+            // 进入嵌套消息循环（不阻塞 UI 线程，仍可处理 Dispatcher 回调）
+            Dispatcher.PushFrame(frame);
+
             this.WindowState = WindowState.Normal; this.Activate();
 
-            if (captured == IntPtr.Zero) { AppendLog("未捕获到窗口"); return false; }
-            User32.GetWindowThreadProcessId(captured, out int pid);
-            if (pid == System.Diagnostics.Process.GetCurrentProcess().Id) { AppendLog("不能选择自身窗口"); return false; }
+            if (capturedHwnd == IntPtr.Zero || capturedElement == null)
+            {
+                AppendLog("未捕获到目标区域");
+                return false;
+            }
 
-            _player.SetTargetWindow(captured);
-            int len = User32.GetWindowTextLength(captured);
-            if (len > 0) { var sb = new System.Text.StringBuilder(len + 1); User32.GetWindowText(captured, sb, sb.Capacity); AppendLog($"已选择: {sb}"); }
+            // 设置目标元素
+            _player.SetTargetElement(capturedHwnd, capturedElement);
+
+            string elementDesc = "";
+            try { elementDesc = $"{capturedElement.ControlType}"; } catch { }
+            try { if (!string.IsNullOrEmpty(capturedElement.Name)) elementDesc += $" '{TruncateStr(capturedElement.Name, 30)}'"; } catch { }
+
+            int len2 = User32.GetWindowTextLength(capturedHwnd);
+            if (len2 > 0)
+            {
+                var sb2 = new System.Text.StringBuilder(len2 + 1);
+                User32.GetWindowText(capturedHwnd, sb2, sb2.Capacity);
+                AppendLog($"已选择: {sb2} → {elementDesc}");
+            }
+            else
+            {
+                AppendLog($"已选择区域: {elementDesc}");
+            }
             return true;
+        }
+
+        private static string TruncateStr(string s, int max) =>
+            string.IsNullOrEmpty(s) ? "" : s.Length > max ? s[..max] + "..." : s;
+
+        // ═══ 窗口检查模式（F12） ═══
+        private Window _inspectTip;       // 悬停提示窗口
+        private Window _inspectTopBar;    // 顶部状态条
+        private IntPtr _inspectHookId = IntPtr.Zero;
+        private User32.LowLevelMouseProc _inspectHookProc;
+        private UIA3Automation _inspectUia;
+        private KeyEventHandler _inspectEscHandler;
+
+        private void InspectBtn_Click(object s, RoutedEventArgs e)
+        {
+            if (_isInspecting) StopInspect(); else StartInspect();
+        }
+
+        private void StartInspect()
+        {
+            if (_isInspecting) return;
+            _isInspecting = true;
+            InspectBtn.Background = new SolidColorBrush(Color.FromRgb(0x4A, 0x14, 0x8C));
+
+            // 创建浮动提示标签
+            _inspectTip = new Window
+            {
+                Title = "", Width = 420, Height = Double.NaN,
+                WindowStyle = WindowStyle.None, AllowsTransparency = true,
+                Background = new SolidColorBrush(Color.FromArgb(235, 20, 20, 20)),
+                Foreground = Brushes.White, ShowInTaskbar = false, Topmost = true,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                IsHitTestVisible = false, Focusable = false,
+                Padding = new Thickness(0)
+            };
+            var tipText = new TextBlock
+            {
+                Foreground = Brushes.White, FontSize = 11, FontFamily = new FontFamily("Consolas"),
+                Margin = new Thickness(8, 5, 8, 5), TextWrapping = TextWrapping.Wrap,
+                Text = "移动鼠标查看窗口信息\nF12 或 Esc 退出检查模式"
+            };
+            _inspectTip.Content = tipText;
+
+            // 创建顶部状态条
+            _inspectTopBar = new Window
+            {
+                Title = "窗口检查模式", Width = 500, Height = 40,
+                WindowStyle = WindowStyle.None, AllowsTransparency = true,
+                Background = new SolidColorBrush(Color.FromArgb(240, 123, 31, 162)),
+                Foreground = Brushes.White, ShowInTaskbar = false, Topmost = true,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                IsHitTestVisible = false, Focusable = false
+            };
+            _inspectTopBar.Content = new TextBlock
+            {
+                Text = "🔍 窗口检查模式 — 移动鼠标查看窗口/元素信息 | F12 或 Esc 退出",
+                FontSize = 12, FontWeight = FontWeights.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+            };
+
+            _inspectUia = new UIA3Automation();
+
+            // 全局鼠标钩子 — 只监听移动
+            _inspectHookProc = (int nCode, IntPtr wParam, IntPtr lParam) =>
+            {
+                if (nCode >= 0)
+                {
+                    int msg = (int)wParam;
+                    if (msg == User32.WM_MOUSEMOVE)
+                    {
+                        var st = Marshal.PtrToStructure<User32.MSLLHOOKSTRUCT>(lParam);
+                        int x = st.pt.x, y = st.pt.y;
+
+                        try
+                        {
+                            // 获取鼠标位置的窗口句柄
+                            IntPtr hwnd = User32.WindowFromPoint(new User32.POINT { x = x, y = y });
+                            IntPtr topHwnd = User32.GetAncestor(hwnd, User32.GA_ROOT);
+                            if (topHwnd == IntPtr.Zero) topHwnd = hwnd;
+
+                            // 排除自身窗口
+                            User32.GetWindowThreadProcessId(topHwnd, out int pid);
+                            int myPid = System.Diagnostics.Process.GetCurrentProcess().Id;
+                            bool isSelf = (pid == myPid);
+
+                            // 获取窗口信息
+                            var sb = new System.Text.StringBuilder();
+
+                            // 窗口标题
+                            int titleLen = User32.GetWindowTextLength(topHwnd);
+                            string windowTitle = "";
+                            if (titleLen > 0)
+                            {
+                                var titleSb = new System.Text.StringBuilder(titleLen + 1);
+                                User32.GetWindowText(topHwnd, titleSb, titleSb.Capacity);
+                                windowTitle = titleSb.ToString();
+                            }
+
+                            // 窗口类名
+                            var clsSb = new System.Text.StringBuilder(256);
+                            User32.GetClassName(topHwnd, clsSb, clsSb.Capacity);
+                            string windowClass = clsSb.ToString();
+
+                            // 进程信息
+                            string processName = "";
+                            try
+                            {
+                                using var proc = System.Diagnostics.Process.GetProcessById(pid);
+                                processName = proc.ProcessName;
+                            }
+                            catch { }
+
+                            sb.AppendLine($"══ 窗口信息 ══");
+                            sb.AppendLine($"标题: {(windowTitle.Length > 50 ? windowTitle[..50] + "..." : windowTitle)}");
+                            sb.AppendLine($"句柄: 0x{topHwnd.ToInt64():X8} ({topHwnd.ToInt64()})");
+                            sb.AppendLine($"类名: {windowClass}");
+                            sb.AppendLine($"进程: {processName} (PID: {pid})");
+                            if (isSelf) sb.AppendLine($"⚠ 自身窗口");
+
+                            // 获取 UIA 元素信息
+                            try
+                            {
+                                var element = _inspectUia.FromPoint(new System.Drawing.Point(x, y));
+                                if (element != null)
+                                {
+                                    sb.AppendLine($"══ 元素信息 ══");
+                                    string ct = "";
+                                    try { ct = element.ControlType.ToString(); } catch { }
+                                    if (!string.IsNullOrEmpty(ct)) sb.AppendLine($"类型: {ct}");
+
+                                    string name = "";
+                                    try { name = element.Name ?? ""; } catch { }
+                                    if (!string.IsNullOrEmpty(name))
+                                        sb.AppendLine($"名称: {(name.Length > 50 ? name[..50] + "..." : name)}");
+
+                                    string cls = "";
+                                    try { cls = element.ClassName ?? ""; } catch { }
+                                    if (!string.IsNullOrEmpty(cls)) sb.AppendLine($"类名: {cls}");
+
+                                    string autoId = "";
+                                    try { autoId = element.AutomationId ?? ""; } catch { }
+                                    if (!string.IsNullOrEmpty(autoId)) sb.AppendLine($"ID: {autoId}");
+
+                                    // BoundingRectangle
+                                    try
+                                    {
+                                        var rect = element.BoundingRectangle;
+                                        sb.AppendLine($"位置: ({(int)rect.X}, {(int)rect.Y}) {((int)rect.Width)}×{((int)rect.Height)}");
+                                    }
+                                    catch { }
+                                }
+                            }
+                            catch { }
+
+                            string tipContent = sb.ToString().TrimEnd();
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                tipText.Text = tipContent;
+                                // 定位提示窗口在鼠标右下方
+                                _inspectTip.Left = x + 20;
+                                _inspectTip.Top = y + 20;
+                                // 防止超出屏幕
+                                if (_inspectTip.Left + 440 > SystemParameters.PrimaryScreenWidth)
+                                    _inspectTip.Left = x - 440;
+                                if (_inspectTip.Top + 200 > SystemParameters.PrimaryScreenHeight)
+                                    _inspectTip.Top = y - 200;
+                            }));
+                        }
+                        catch { }
+                    }
+                }
+                return User32.CallNextHookEx(_inspectHookId, nCode, wParam, lParam);
+            };
+
+            // 安装全局鼠标钩子
+            using (var cur = System.Diagnostics.Process.GetCurrentProcess())
+            using (var mod = cur.MainModule)
+            {
+                _inspectHookId = User32.SetWindowsHookEx(User32.WH_MOUSE_LL, _inspectHookProc,
+                    User32.GetModuleHandle(mod!.ModuleName), 0);
+            }
+
+            // Esc 键退出
+            _inspectEscHandler = new KeyEventHandler((s, e) =>
+            {
+                if (e.Key == Key.Escape && _isInspecting)
+                    StopInspect();
+            });
+            this.KeyDown += _inspectEscHandler;
+
+            _inspectTip.Show();
+            _inspectTopBar.Show();
+            AppendLog("🔍 窗口检查模式已开启 — 移动鼠标查看窗口信息，F12/Esc 退出");
+        }
+
+        private void StopInspect()
+        {
+            if (!_isInspecting) return;
+            _isInspecting = false;
+
+            // 卸载钩子
+            if (_inspectHookId != IntPtr.Zero)
+            {
+                User32.UnhookWindowsHookEx(_inspectHookId);
+                _inspectHookId = IntPtr.Zero;
+            }
+
+            // 移除 Esc 监听
+            if (_inspectEscHandler != null)
+            {
+                this.KeyDown -= _inspectEscHandler;
+                _inspectEscHandler = null;
+            }
+
+            // 关闭提示窗口
+            try { _inspectTip?.Close(); } catch { }
+            try { _inspectTopBar?.Close(); } catch { }
+            _inspectTip = null;
+            _inspectTopBar = null;
+
+            // 释放 UIA
+            try { _inspectUia?.Dispose(); } catch { }
+            _inspectUia = null;
+
+            InspectBtn.Background = new SolidColorBrush(Color.FromRgb(0x7B, 0x1F, 0xA2));
+            AppendLog("🔍 窗口检查模式已关闭");
         }
 
         // ═══ 工具 ═══
@@ -1876,32 +2418,81 @@ namespace WeChatAutomation.App
         {
             if (_steps.Count == 0) return;
 
-            // 检查是否有参数需要输入
+            // 收集所有需要用户输入的参数
             Dictionary<string, string> parameters = null;
+
+            // 1. 从已保存的脚本文件中获取参数定义
+            List<ScriptParameter> paramDefs = null;
             if (_currentScript != null)
             {
                 try
                 {
                     var rec = ActionRecorder.LoadFromFile(_currentScript.FilePath);
                     if (rec.Parameters != null && rec.Parameters.Count > 0)
-                    {
-                        parameters = ShowParameterInputDialog(rec.Parameters);
-                        if (parameters == null) return; // 用户取消
-                    }
+                        paramDefs = rec.Parameters;
                 }
                 catch { }
+            }
+
+            // 2. 从步骤列表中的 InputParam 步骤提取参数（覆盖未保存的参数）
+            var stepParams = _steps
+                .Where(s => s.ActionType == ActionType.InputParam && !string.IsNullOrEmpty(s.ParameterName))
+                .Select(s => new ScriptParameter
+                {
+                    Name = s.ParameterName,
+                    DisplayName = s.Name?.Replace("参数: ", "").Replace("输入参数: ", "") ?? s.ParameterName,
+                    DefaultValue = s.DefaultValue ?? s.Parameter?.TrimStart('{').TrimEnd('}'),
+                    IsRequired = s.IsRequired,
+                    Type = ParameterType.Text,
+                    CopyToClipboard = s.CopyToClipboard,
+                    Description = ""
+                })
+                .ToList();
+
+            // 合并：步骤中的参数优先（因为可能包含未保存的更改）
+            if (stepParams.Count > 0)
+            {
+                paramDefs ??= new List<ScriptParameter>();
+                foreach (var sp in stepParams)
+                {
+                    // 如果参数定义中已有同名参数，用步骤中的覆盖
+                    var existingIdx = paramDefs.FindIndex(p => p.Name == sp.Name);
+                    if (existingIdx >= 0)
+                        paramDefs[existingIdx] = sp;
+                    else
+                        paramDefs.Add(sp);
+                }
+            }
+
+            // 3. 如果有任何参数定义，弹出输入对话框
+            if (paramDefs != null && paramDefs.Count > 0)
+            {
+                parameters = ShowParameterInputDialog(paramDefs);
+                if (parameters == null) return; // 用户取消
             }
 
             PlayBtn.IsEnabled = false;
             StopPlayBtn.IsEnabled = true;
 
-            if (parameters != null && _currentScript != null)
+            if (parameters != null && parameters.Count > 0)
             {
-                // 使用 ScriptExecutor 执行（支持参数替换）
-                var result = await App.ScriptExecutor.ExecuteScript(
-                    Path.GetFileNameWithoutExtension(_currentScript.FilePath),
-                    parameters);
-                AppendLog(result.Success ? "执行完成" : $"执行失败: {result.Message}");
+                // 有参数时，使用 ScriptExecutor 执行（支持参数替换）
+                if (_currentScript != null)
+                {
+                    var result = await App.ScriptExecutor.ExecuteScript(
+                        Path.GetFileNameWithoutExtension(_currentScript.FilePath),
+                        parameters);
+                    AppendLog(result.Success ? "执行完成" : $"执行失败: {result.Message}");
+                }
+                else
+                {
+                    // 未保存的脚本，手动替换参数后直接用 ActionPlayer 执行
+                    if (_steps.Any(s => s.ClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision))
+                        _player.EnsureVisionModel(_currentVisionModel);
+
+                    var resolvedSteps = ReplaceStepParameters(_steps.ToList(), parameters);
+                    await _player.Play(resolvedSteps, _currentVisionModel);
+                }
             }
             else
             {
@@ -1912,6 +2503,75 @@ namespace WeChatAutomation.App
 
             PlayBtn.IsEnabled = _steps.Count > 0;
             StopPlayBtn.IsEnabled = false;
+        }
+
+        /// <summary>
+        /// 手动替换步骤中的参数占位符（用于未保存的脚本）
+        /// </summary>
+        private List<RecordedAction> ReplaceStepParameters(List<RecordedAction> steps, Dictionary<string, string> parameters)
+        {
+            var result = new List<RecordedAction>();
+            foreach (var action in steps)
+            {
+                var newAction = new RecordedAction
+                {
+                    NodeId = action.NodeId,
+                    Order = action.Order,
+                    ActionType = action.ActionType,
+                    Name = action.Name ?? "",
+                    ClassName = action.ClassName,
+                    ElementName = action.ElementName,
+                    AutomationId = action.AutomationId,
+                    ControlType = action.ControlType,
+                    WindowTitle = action.WindowTitle,
+                    X = action.X,
+                    Y = action.Y,
+                    ClickMode = action.ClickMode,
+                    VisionLabel = action.VisionLabel,
+                    VisionConfThreshold = action.VisionConfThreshold,
+                    XPath = action.XPath,
+                    SiblingIndex = action.SiblingIndex,
+                    RuntimeId = action.RuntimeId,
+                    Parameter = action.Parameter ?? "",
+                    DelayMs = action.DelayMs,
+                    ScrollAmount = action.ScrollAmount,
+                    ParameterName = action.ParameterName,
+                    DefaultValue = action.DefaultValue,
+                    IsRequired = action.IsRequired,
+                    CopyToClipboard = action.CopyToClipboard,
+                    RegexPattern = action.RegexPattern,
+                    RegexGroup = action.RegexGroup,
+                    OutputParamName = action.OutputParamName,
+                    IsEnabled = action.IsEnabled,
+                    CreatedAt = action.CreatedAt
+                };
+
+                foreach (var kvp in parameters)
+                {
+                    newAction.Parameter = newAction.Parameter.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.Name = newAction.Name.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.WindowTitle = newAction.WindowTitle?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.ElementName = newAction.ElementName?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.XPath = newAction.XPath?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.VisionLabel = newAction.VisionLabel?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                }
+
+                // InputParam 步骤：直接使用参数值
+                if (newAction.ActionType == ActionType.InputParam && newAction.CopyToClipboard)
+                {
+                    foreach (var kvp in parameters)
+                    {
+                        if (kvp.Key == newAction.ParameterName)
+                        {
+                            newAction.Parameter = kvp.Value;
+                            break;
+                        }
+                    }
+                }
+
+                result.Add(newAction);
+            }
+            return result;
         }
 
         // ═══ YOLO 训练向导 ═══

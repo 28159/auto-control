@@ -24,6 +24,7 @@ namespace WeChatAutomation.Core.Recording
         private CancellationTokenSource _cts;
         private bool _isPlaying;
         private IntPtr _targetWindow = IntPtr.Zero;
+        private AutomationElement _targetElement = null; // 用户选择的具体 UIA 元素（用于阅读）
         private readonly HumanInputSimulator _simulator = new();
         private VisionDetector _visionDetector;
 
@@ -34,7 +35,20 @@ namespace WeChatAutomation.Core.Recording
         /// <summary>
         /// 设置目标窗口句柄（用于阅读功能）
         /// </summary>
-        public void SetTargetWindow(IntPtr hwnd) => _targetWindow = hwnd;
+        public void SetTargetWindow(IntPtr hwnd)
+        {
+            _targetWindow = hwnd;
+            _targetElement = null; // 清除旧的元素引用
+        }
+
+        /// <summary>
+        /// 设置目标 UIA 元素（用于阅读具体区域内容）
+        /// </summary>
+        public void SetTargetElement(IntPtr hwnd, AutomationElement element)
+        {
+            _targetWindow = hwnd;
+            _targetElement = element;
+        }
 
         public bool InitVisionDetector(string modelPath, string labelsPath = null)
         {
@@ -103,6 +117,7 @@ namespace WeChatAutomation.Core.Recording
             _cts = new CancellationTokenSource();
             _readResults.Clear();
             _variables.Clear();
+            // 注意：不清除 _targetWindow 和 _targetElement，它们是用户通过 PickTargetWindow 选择的阅读目标
             OnLog($"开始回放，共 {nodes.Count} 步" +
                   (string.IsNullOrEmpty(visionModelFileName) ? "" : $"（视觉模型: {visionModelFileName}）"));
 
@@ -981,8 +996,34 @@ namespace WeChatAutomation.Core.Recording
         {
             try
             {
-                IntPtr hwnd = ResolveTargetWindow(windowTitle);
-                if (hwnd == IntPtr.Zero) { OnLog("无法获取目标窗口"); return; }
+                AutomationElement readElement = null;
+                IntPtr hwnd;
+
+                if (_targetElement != null && _targetWindow != IntPtr.Zero)
+                {
+                    // 用户通过 PickTargetWindow 选中了具体元素，优先用该元素读取
+                    hwnd = _targetWindow;
+                    readElement = _targetElement;
+                    OnLog("阅读: 使用用户选择的目标元素");
+                }
+                else if (_targetWindow != IntPtr.Zero)
+                {
+                    // 仅有窗口句柄，从窗口根元素出发查找内容区域
+                    hwnd = _targetWindow;
+                    var windowElement = _automation.FromHandle(hwnd);
+                    var contentElement = FindContentElement(windowElement);
+                    readElement = contentElement ?? windowElement;
+                    OnLog("阅读: 使用用户选择的目标窗口");
+                }
+                else
+                {
+                    hwnd = ResolveTargetWindow(windowTitle);
+                    if (hwnd == IntPtr.Zero) { OnLog("无法获取目标窗口"); return; }
+
+                    var element = _automation.FromHandle(hwnd);
+                    var contentElement = FindContentElement(element);
+                    readElement = contentElement ?? element;
+                }
 
                 int len = User32.GetWindowTextLength(hwnd);
                 string title = "";
@@ -993,8 +1034,7 @@ namespace WeChatAutomation.Core.Recording
                     title = sb.ToString();
                 }
 
-                var element = _automation.FromHandle(hwnd);
-                string content = ExtractAllText(element, 0, 5);
+                string content = ExtractAllText(readElement, 0, 10);
 
                 var result = new ReadContentResult
                 {
@@ -1014,8 +1054,30 @@ namespace WeChatAutomation.Core.Recording
         {
             try
             {
-                IntPtr hwnd = ResolveTargetWindow(windowTitle);
-                if (hwnd == IntPtr.Zero) { OnLog("无法获取目标窗口"); return; }
+                AutomationElement readElement = null;
+                IntPtr hwnd;
+
+                if (_targetElement != null && _targetWindow != IntPtr.Zero)
+                {
+                    hwnd = _targetWindow;
+                    readElement = _targetElement;
+                }
+                else if (_targetWindow != IntPtr.Zero)
+                {
+                    hwnd = _targetWindow;
+                    var windowElement = _automation.FromHandle(hwnd);
+                    var contentElement = FindContentElement(windowElement);
+                    readElement = contentElement ?? windowElement;
+                }
+                else
+                {
+                    hwnd = ResolveTargetWindow(windowTitle);
+                    if (hwnd == IntPtr.Zero) { OnLog("无法获取目标窗口"); return; }
+
+                    var element = _automation.FromHandle(hwnd);
+                    var contentElement = FindContentElement(element);
+                    readElement = contentElement ?? element;
+                }
 
                 int len = User32.GetWindowTextLength(hwnd);
                 string title = "";
@@ -1048,8 +1110,25 @@ namespace WeChatAutomation.Core.Recording
                 User32.SendInput(1, new[] { scrollInput }, System.Runtime.InteropServices.Marshal.SizeOf<User32.INPUT>());
                 await Task.Delay(500);
 
-                var element = _automation.FromHandle(hwnd);
-                string content = ExtractAllText(element, 0, 5);
+                // 滚动后重新获取元素内容
+                string content;
+                if (_targetElement != null && _targetWindow != IntPtr.Zero)
+                {
+                    // 用户选择了具体元素，从该元素重新读取
+                    content = ExtractAllText(readElement, 0, 10);
+                }
+                else if (_targetWindow != IntPtr.Zero)
+                {
+                    var windowElement = _automation.FromHandle(hwnd);
+                    var contentElement = FindContentElement(windowElement);
+                    content = ExtractAllText(contentElement ?? windowElement, 0, 10);
+                }
+                else
+                {
+                    var element = _automation.FromHandle(hwnd);
+                    var contentElement = FindContentElement(element);
+                    content = ExtractAllText(contentElement ?? element, 0, 10);
+                }
 
                 var result = new ReadContentResult
                 {
@@ -1084,7 +1163,75 @@ namespace WeChatAutomation.Core.Recording
         }
 
         /// <summary>
-        /// 递归提取 UIA 元素的所有文本（FlaUI 版本）
+        /// 在窗口 UIA 树中查找主要内容区域元素。
+        /// 跳过标题栏、菜单栏、工具栏、状态栏等外围元素，
+        /// 找到包含实际内容的 Document 或 Pane 子元素。
+        /// </summary>
+        private AutomationElement FindContentElement(AutomationElement windowElement)
+        {
+            if (windowElement == null) return null;
+
+            try
+            {
+                // 1. 优先查找 Document 类型元素（如浏览器、聊天窗口的内容区）
+                var doc = windowElement.FindFirstDescendant(_cf.ByControlType(FlaUI.Core.Definitions.ControlType.Document));
+                if (doc != null)
+                {
+                    OnLog("阅读: 找到 Document 内容区域");
+                    return doc;
+                }
+
+                // 2. 查找具有大量文本子元素的 Pane（通常是主内容区）
+                var children = windowElement.FindAllChildren();
+                if (children.Length > 0)
+                {
+                    // 寻找子元素最多的 Pane（通常是内容区域而非工具栏）
+                    AutomationElement bestPane = null;
+                    int bestChildCount = 0;
+
+                    foreach (var child in children)
+                    {
+                        try
+                        {
+                            // 跳过标题栏、菜单栏、工具栏、状态栏
+                            if (child.ControlType == FlaUI.Core.Definitions.ControlType.TitleBar ||
+                                child.ControlType == FlaUI.Core.Definitions.ControlType.MenuBar ||
+                                child.ControlType == FlaUI.Core.Definitions.ControlType.ToolBar ||
+                                child.ControlType == FlaUI.Core.Definitions.ControlType.StatusBar)
+                                continue;
+
+                            // 统计该子元素的后代数量（作为内容丰富度的指标）
+                            var descendants = child.FindAllDescendants();
+                            if (descendants.Length > bestChildCount)
+                            {
+                                bestChildCount = descendants.Length;
+                                bestPane = child;
+                            }
+                        }
+                        catch { }
+                    }
+
+                    if (bestPane != null && bestChildCount > 5)
+                    {
+                        OnLog($"阅读: 找到内容区域 (ControlType={bestPane.ControlType}, {bestChildCount} 个后代元素)");
+                        return bestPane;
+                    }
+                }
+
+                // 3. 没有找到更好的内容区域，返回整个窗口
+                OnLog("阅读: 使用整个窗口元素");
+                return windowElement;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn("Player", $"查找内容区域失败: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 递归提取 UIA 元素的所有文本（FlaUI 版本）。
+        /// 支持 Name 属性、ValuePattern、TextPattern、RangePattern。
         /// </summary>
         private string ExtractAllText(AutomationElement element, int depth, int maxDepth)
         {
@@ -1093,13 +1240,13 @@ namespace WeChatAutomation.Core.Recording
             var texts = new List<string>();
             try
             {
-                // 获取当前元素的名称
+                // 1. 获取当前元素的 Name 属性
                 string name = "";
                 try { name = element.Name ?? ""; } catch { }
                 if (!string.IsNullOrWhiteSpace(name))
                     texts.Add(name);
 
-                // 获取 ValuePattern 的值
+                // 2. 获取 ValuePattern 的值（适用于 Edit、TextBox 等输入控件）
                 try
                 {
                     var valuePattern = element.Patterns.Value.PatternOrDefault;
@@ -1112,7 +1259,24 @@ namespace WeChatAutomation.Core.Recording
                 }
                 catch { /* ValuePattern 不可用则忽略 */ }
 
-                // 递归子元素
+                // 3. 获取 TextPattern 的值（适用于富文本、聊天消息等）
+                try
+                {
+                    var textPattern = element.Patterns.Text.PatternOrDefault;
+                    if (textPattern != null)
+                    {
+                        var documentRange = textPattern.DocumentRange;
+                        if (documentRange != null)
+                        {
+                            string text = documentRange.GetText(int.MaxValue);
+                            if (!string.IsNullOrWhiteSpace(text) && text != name)
+                                texts.Add(text);
+                        }
+                    }
+                }
+                catch { /* TextPattern 不可用则忽略 */ }
+
+                // 4. 递归子元素
                 var children = element.FindAllChildren();
                 foreach (var child in children)
                 {
@@ -1136,8 +1300,30 @@ namespace WeChatAutomation.Core.Recording
                     return;
                 }
 
-                IntPtr hwnd = ResolveTargetWindow(node.WindowTitle);
-                if (hwnd == IntPtr.Zero) { OnLog("正则识别: 无法获取目标窗口"); return; }
+                IntPtr hwnd;
+                string content;
+
+                if (_targetElement != null && _targetWindow != IntPtr.Zero)
+                {
+                    hwnd = _targetWindow;
+                    content = ExtractAllText(_targetElement, 0, 10);
+                }
+                else if (_targetWindow != IntPtr.Zero)
+                {
+                    hwnd = _targetWindow;
+                    var windowElement = _automation.FromHandle(hwnd);
+                    var contentElement = FindContentElement(windowElement);
+                    content = ExtractAllText(contentElement ?? windowElement, 0, 10);
+                }
+                else
+                {
+                    hwnd = ResolveTargetWindow(node.WindowTitle);
+                    if (hwnd == IntPtr.Zero) { OnLog("正则识别: 无法获取目标窗口"); return; }
+
+                    var element = _automation.FromHandle(hwnd);
+                    var contentElement = FindContentElement(element);
+                    content = ExtractAllText(contentElement ?? element, 0, 10);
+                }
 
                 int len = User32.GetWindowTextLength(hwnd);
                 string title = "";
@@ -1147,9 +1333,6 @@ namespace WeChatAutomation.Core.Recording
                     User32.GetWindowText(hwnd, sb, sb.Capacity);
                     title = sb.ToString();
                 }
-
-                var element = _automation.FromHandle(hwnd);
-                string content = ExtractAllText(element, 0, 5);
 
                 if (string.IsNullOrEmpty(content))
                 {
