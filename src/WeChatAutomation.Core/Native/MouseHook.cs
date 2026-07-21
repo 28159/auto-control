@@ -1,8 +1,9 @@
 using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Windows.Automation;
+using FlaUI.UIA3;
 using WeChatAutomation.Core.Logging;
+using WeChatAutomation.Core.Recording;
 
 namespace WeChatAutomation.Core.Native
 {
@@ -16,6 +17,9 @@ namespace WeChatAutomation.Core.Native
         public string? ElementName { get; set; }
         public string? AutomationId { get; set; }
         public string? ControlType { get; set; }
+        public string? XPath { get; set; }
+        public int SiblingIndex { get; set; }
+        public string? RuntimeId { get; set; }
     }
 
     /// <summary>
@@ -24,6 +28,7 @@ namespace WeChatAutomation.Core.Native
     public class MouseHook : IDisposable
     {
         private static readonly Logger _logger = Logger.Instance;
+        private static readonly UIA3Automation _automation = new();
         private User32.LowLevelMouseProc _proc;
         private IntPtr _hookId = IntPtr.Zero;
         private bool _isCapturing;
@@ -102,24 +107,41 @@ namespace WeChatAutomation.Core.Native
 
                     try
                     {
-                        var element = AutomationElement.FromPoint(new System.Windows.Point(capturedX, capturedY));
+                        var element = _automation.FromPoint(new System.Drawing.Point(capturedX, capturedY));
                         if (element != null)
                         {
-                            info.ClassName = element.Current.ClassName;
-                            info.ElementName = element.Current.Name;
-                            info.AutomationId = element.Current.AutomationId;
-                            info.ControlType = element.Current.ControlType?.ProgrammaticName?.Replace("ControlType.", "") ?? "";
+                            info.ClassName = element.ClassName ?? "";
+                            info.ElementName = element.Name ?? "";
+                            info.AutomationId = element.AutomationId ?? "";
+                            info.ControlType = element.ControlType.ToString();
 
                             // 尝试获取元素所在的顶层窗口名称
                             if (string.IsNullOrEmpty(info.WindowTitle))
                             {
-                                var parentWindow = element.FindFirst(TreeScope.Ancestors,
-                                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window));
-                                if (parentWindow != null)
+                                try
                                 {
-                                    info.WindowTitle = parentWindow.Current.Name;
+                                    var parent = element.Parent;
+                                    while (parent != null)
+                                    {
+                                        if (parent.ControlType == FlaUI.Core.Definitions.ControlType.Window)
+                                        {
+                                            info.WindowTitle = parent.Name;
+                                            break;
+                                        }
+                                        parent = parent.Parent;
+                                    }
                                 }
+                                catch { /* 父级遍历失败则忽略 */ }
                             }
+
+                            // 构建 XPath 路径
+                            try
+                            {
+                                info.XPath = XPathBuilder.BuildXPath(element);
+                                info.SiblingIndex = XPathBuilder.ComputeSiblingIndex(element);
+                                info.RuntimeId = XPathBuilder.ExtractRuntimeId(element);
+                            }
+                            catch (Exception ex) { _logger.Warn("MouseHook", $"XPath 构建失败: {ex.Message}"); }
                         }
                     }
                     catch (Exception ex) { _logger.Warn("MouseHook", $"UIA 元素捕获失败: {ex.Message}"); }

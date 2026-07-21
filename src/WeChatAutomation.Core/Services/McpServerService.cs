@@ -234,6 +234,24 @@ namespace WeChatAutomation.Core.Services
                         },
                         Required = new List<string> { "script_name" }
                     }
+                },
+                new McpTool
+                {
+                    Name = "parse_command",
+                    Description = "将自然语言命令解析为自动化步骤（如'点击发送按钮'、'在搜索框输入你好'）",
+                    InputSchema = new McpInputSchema
+                    {
+                        Type = "object",
+                        Properties = new Dictionary<string, McpSchemaProperty>
+                        {
+                            ["command"] = new McpSchemaProperty
+                            {
+                                Type = "string",
+                                Description = "自然语言命令，如 '点击发送按钮' 或 '在搜索框输入你好'"
+                            }
+                        },
+                        Required = new List<string> { "command" }
+                    }
                 }
             };
         }
@@ -268,6 +286,9 @@ namespace WeChatAutomation.Core.Services
 
                     case "check_script_exists":
                         return HandleCheckScriptExists(request, toolParams);
+
+                    case "parse_command":
+                        return HandleParseCommand(request, toolParams);
 
                     default:
                         return new McpResponse
@@ -445,6 +466,56 @@ namespace WeChatAutomation.Core.Services
                     }
                 }
             };
+        }
+
+        private McpResponse HandleParseCommand(McpRequest request, McpToolCallParams toolParams)
+        {
+            var command = toolParams.Arguments?.GetValueOrDefault("command")?.ToString();
+            if (string.IsNullOrEmpty(command))
+            {
+                return new McpResponse
+                {
+                    Id = request.Id,
+                    IsError = true,
+                    Content = new List<McpContent>
+                    {
+                        new McpContent { Type = "text", Text = "缺少 command 参数" }
+                    }
+                };
+            }
+
+            try
+            {
+                var parser = new LlmCommandParser();
+                var actions = parser.ParseCommand(command);
+                var result = actions.Count > 0
+                    ? string.Join("\n", actions.Select(a => a.Summary))
+                    : "无法解析该命令";
+
+                return new McpResponse
+                {
+                    Id = request.Id,
+                    Result = new McpToolResult
+                    {
+                        Content = new List<McpContent>
+                        {
+                            new McpContent { Type = "text", Text = result }
+                        }
+                    }
+                };
+            }
+            catch (Exception ex)
+            {
+                return new McpResponse
+                {
+                    Id = request.Id,
+                    IsError = true,
+                    Content = new List<McpContent>
+                    {
+                        new McpContent { Type = "text", Text = $"命令解析失败: {ex.Message}" }
+                    }
+                };
+            }
         }
 
         public Task StopAsync(CancellationToken cancellationToken)

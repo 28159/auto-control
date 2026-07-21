@@ -7,6 +7,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using FlaUIAutomation = FlaUI.Core.AutomationElements;
+using FlaUI.UIA3;
 using WeChatAutomation.Core.Native;
 using WeChatAutomation.Core.Recording;
 using WeChatAutomation.Core.Services;
@@ -30,6 +32,11 @@ namespace WeChatAutomation.App
         public MainWindow()
         {
             InitializeComponent();
+
+            // XAML 初始化期间 ClickModeRadioButton_Changed 可能在控件未完全创建时触发，
+            // 这里确保所有控件就绪后正确设置可见性
+            UpdateClickModeUI();
+
             StepsGrid.ItemsSource = _steps;
             ScriptsListBox.ItemsSource = _scripts;
 
@@ -155,6 +162,15 @@ namespace WeChatAutomation.App
                     ClickModeVision.IsChecked = true;
                     break;
             }
+
+            // 视觉专属控件仅在视觉模式下可见（控件可能在 XAML 初始化期间为 null）
+            bool isVision = _currentClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision;
+            if (CaptureTrainingCheck != null)
+                CaptureTrainingCheck.Visibility = isVision ? Visibility.Visible : Visibility.Collapsed;
+            if (VisionModelCombo != null)
+                VisionModelCombo.Visibility = isVision ? Visibility.Visible : Visibility.Collapsed;
+            if (VisionModelLabel != null)
+                VisionModelLabel.Visibility = isVision ? Visibility.Visible : Visibility.Collapsed;
         }
 
         // ═══ 视觉模型选择（每脚本一个，保存复用） ═══
@@ -517,7 +533,8 @@ namespace WeChatAutomation.App
                         return;
                     }
 
-                    var element = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
+                    var uia = new UIA3Automation();
+                    var element = uia.FromHandle(hwnd);
                     var content = ExtractTestContent(element);
 
                     var regex = new System.Text.RegularExpressions.Regex(
@@ -602,22 +619,27 @@ namespace WeChatAutomation.App
             return result;
         }
 
-        private string ExtractTestContent(System.Windows.Automation.AutomationElement element, int depth = 0, int maxDepth = 5)
+        private string ExtractTestContent(FlaUIAutomation.AutomationElement element, int depth = 0, int maxDepth = 5)
         {
             if (depth > maxDepth || element == null) return "";
             var texts = new List<string>();
             try
             {
-                string name = element.Current.Name;
+                string name = "";
+                try { name = element.Name ?? ""; } catch { }
                 if (!string.IsNullOrWhiteSpace(name)) texts.Add(name);
-                if (element.TryGetCurrentPattern(System.Windows.Automation.ValuePattern.Pattern, out object patternObj))
+                try
                 {
-                    var vp = (System.Windows.Automation.ValuePattern)patternObj;
-                    string val = vp.Current.Value;
-                    if (!string.IsNullOrWhiteSpace(val) && val != name) texts.Add(val);
+                    var valuePattern = element.Patterns.Value.PatternOrDefault;
+                    if (valuePattern != null)
+                    {
+                        string val = valuePattern.Value.Value ?? "";
+                        if (!string.IsNullOrWhiteSpace(val) && val != name) texts.Add(val);
+                    }
                 }
-                var children = element.FindAll(System.Windows.Automation.TreeScope.Children, System.Windows.Automation.Condition.TrueCondition);
-                foreach (System.Windows.Automation.AutomationElement child in children)
+                catch { }
+                var children = element.FindAllChildren();
+                foreach (var child in children)
                 {
                     string childText = ExtractTestContent(child, depth + 1, maxDepth);
                     if (!string.IsNullOrWhiteSpace(childText)) texts.Add(childText);
@@ -1378,6 +1400,40 @@ namespace WeChatAutomation.App
                 RefreshGrid();
                 PlayBtn.IsEnabled = _steps.Count > 0;
                 AppendLog($"已添加参数步骤: {param.Name}");
+            }
+        }
+
+        private void ParseCommand_Click(object s, RoutedEventArgs e)
+        {
+            string command = CommandInput?.Text?.Trim();
+            if (string.IsNullOrEmpty(command))
+            {
+                AppendLog("请输入自然语言命令");
+                return;
+            }
+
+            try
+            {
+                var parser = new LlmCommandParser();
+                var actions = parser.ParseCommand(command);
+                if (actions.Count == 0)
+                {
+                    AppendLog($"无法解析命令: {command}");
+                    return;
+                }
+
+                foreach (var action in actions)
+                {
+                    _recorder.AddManual(action);
+                }
+                RefreshGrid();
+                PlayBtn.IsEnabled = _steps.Count > 0;
+                AppendLog($"已解析 {actions.Count} 步: {string.Join(", ", actions.Select(a => a.Summary))}");
+                CommandInput.Text = "";
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"命令解析失败: {ex.Message}");
             }
         }
 

@@ -139,6 +139,20 @@ namespace WeChatAutomation.Core.Services
                     return Results.Ok(new { name, exists });
                 });
 
+                _app.MapPost("/api/parse-command", (ParseCommandRequest req) =>
+                {
+                    try
+                    {
+                        var parser = new LlmCommandParser();
+                        var actions = parser.ParseCommand(req.Command);
+                        return Results.Ok(new { command = req.Command, actions, count = actions.Count });
+                    }
+                    catch (Exception ex)
+                    {
+                        return Results.BadRequest(new { error = ex.Message });
+                    }
+                });
+
                 _app.MapGet("/api/health", () => Results.Ok("OK"));
 
                 _appTask = _app.StartAsync(_cts.Token);
@@ -177,5 +191,10 @@ namespace WeChatAutomation.Core.Services
     {
         public string ScriptName { get; set; }
         public Dictionary<string, string> Parameters { get; set; }
+    }
+
+    public class ParseCommandRequest
+    {
+        public string Command { get; set; }
     }
 }

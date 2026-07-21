@@ -122,12 +122,13 @@
                                          Checked="ClickModeRadioButton_Changed"/>
                             <CheckBox x:Name="CaptureTrainingCheck" Content="采集训练数据" VerticalAlignment="Center"
                                       Margin="8,0,0,0" FontSize="11" ToolTip="录制时自动截图保存，用于 YOLO 模型训练"
-                                      Checked="CaptureTrainingCheck_Changed" Unchecked="CaptureTrainingCheck_Changed"/>
-                            <TextBlock Text="模型:" VerticalAlignment="Center" Foreground="#666" Margin="8,0,3,0" FontSize="11"
-                                       ToolTip="脚本绑定的视觉模型（保存后回放/调用复用）"/>
+                                      Checked="CaptureTrainingCheck_Changed" Unchecked="CaptureTrainingCheck_Changed"
+                                      Visibility="Collapsed"/>
+                            <TextBlock x:Name="VisionModelLabel" Text="模型:" VerticalAlignment="Center" Foreground="#666" Margin="8,0,3,0" FontSize="11"
+                                       ToolTip="脚本绑定的视觉模型（保存后回放/调用复用）" Visibility="Collapsed"/>
                             <ComboBox x:Name="VisionModelCombo" Width="150" VerticalAlignment="Center" FontSize="11"
                                       ToolTip="选择视觉模式使用的 ONNX 模型（项目 models 目录）"
-                                      SelectionChanged="VisionModelCombo_SelectionChanged"/>
+                                      SelectionChanged="VisionModelCombo_SelectionChanged" Visibility="Collapsed"/>
                         </StackPanel>
 
                         <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -205,6 +206,11 @@
                                 <Button Content="🔍正则" Click="AddRegexMatch_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="正则识别屏幕内容"/>
                                 <Button Content="🖱滚动" Click="AddScroll_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
                                 <Button Content="📝参数" Click="AddInputParam_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="添加动态输入参数"/>
+                                <Separator Margin="4,0"/>
+                                <TextBlock Text="🤖" VerticalAlignment="Center" FontSize="11"/>
+                                <TextBox x:Name="CommandInput" Width="160" VerticalAlignment="Center" FontSize="11"
+                                         ToolTip="输入自然语言命令，如'点击发送按钮'、'在搜索框输入你好'"/>
+                                <Button Content="解析" Click="ParseCommand_Click" Padding="6,2" Margin="2,0,0,0" FontSize="11" ToolTip="将自然语言命令解析为自动化步骤"/>
                             </WrapPanel>
 
                             <!-- 编辑操作 -->

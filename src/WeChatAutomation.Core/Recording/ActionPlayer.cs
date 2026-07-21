@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using FlaUI.Core.AutomationElements;
+using FlaUI.Core.Conditions;
+using FlaUI.UIA3;
 using WeChatAutomation.Core.Logging;
 using WeChatAutomation.Core.Native;
 using WeChatAutomation.Core.Vision;
@@ -15,6 +19,8 @@ namespace WeChatAutomation.Core.Recording
     public class ActionPlayer : IDisposable
     {
         private static readonly Logger _logger = Logger.Instance;
+        private static readonly UIA3Automation _automation = new();
+        private static readonly ConditionFactory _cf = _automation.ConditionFactory;
         private CancellationTokenSource _cts;
         private bool _isPlaying;
         private IntPtr _targetWindow = IntPtr.Zero;
@@ -278,7 +284,9 @@ namespace WeChatAutomation.Core.Recording
                 return;
             }
 
-            OnLog($"UIA路径定位失败: {node.ElementName ?? node.ClassName ?? node.AutomationId ?? "未知"}");
+            // 路径模式下禁止回退到坐标点击——直接报告失败
+            OnLog($"UIA路径定位失败: {node.ElementName ?? node.ClassName ?? node.AutomationId ?? "未知"}" +
+                  (!string.IsNullOrEmpty(node.XPath) ? $" (XPath={Trunc(node.XPath, 40)})" : ""));
         }
 
         private async Task DoClickByVisionAsync(RecordedAction node)
@@ -328,6 +336,25 @@ namespace WeChatAutomation.Core.Recording
                 detection = _visionDetector.FindBest(screenshot, label, confThreshold);
             }
 
+            // 特定标签检测失败时，尝试降级到更通用的 "button" 标签
+            if (detection == null && label != "button")
+            {
+                OnLog($"视觉模式: '{label}' 未检测到，尝试降级到 'button'");
+                if (hasRef)
+                {
+                    int localRefX = (int)(node.X - winX);
+                    int localRefY = (int)(node.Y - winY);
+                    int tolerance = (int)(Math.Min(winW, winH) * 0.45);
+                    detection = _visionDetector.FindNearest(screenshot, "button", localRefX, localRefY, tolerance, confThreshold);
+                }
+                else
+                {
+                    detection = _visionDetector.FindBest(screenshot, "button", confThreshold);
+                }
+                if (detection != null)
+                    OnLog($"视觉模式降级检测成功: button ({detection.Confidence:P0})");
+            }
+
             if (detection == null)
             {
                 OnLog($"视觉模式失败: 未检测到 \"{label}\" (置信度阈值: {confThreshold})");
@@ -343,7 +370,8 @@ namespace WeChatAutomation.Core.Recording
         }
 
         /// <summary>
-        /// 通过 UIA 属性定位元素，返回 (是否找到, 窗口句柄, 元素边界框)
+        /// 通过 UIA 属性定位元素，5 策略级联（XPath 优先）
+        /// 返回 (是否找到, 窗口句柄, 元素边界框)
         /// </summary>
         private (bool found, IntPtr hwnd, System.Windows.Rect rect) TryLocateElement(RecordedAction node)
         {
@@ -357,75 +385,437 @@ namespace WeChatAutomation.Core.Recording
                     return (false, IntPtr.Zero, default);
                 }
 
-                var root = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
+                var root = _automation.FromHandle(hwnd);
                 if (root == null)
                 {
                     OnLog("无法获取窗口 UIA 根元素");
                     return (false, hwnd, default);
                 }
 
-                // 2. 按优先级逐步放宽条件搜索元素
-                System.Windows.Automation.AutomationElement element = null;
+                AutomationElement element = null;
                 string matchMethod = "";
 
-                // 策略1: AutomationId 精确匹配
-                if (element == null && !string.IsNullOrEmpty(node.AutomationId))
+                // 策略1: XPath 查找（最精确）
+                if (element == null && !string.IsNullOrEmpty(node.XPath))
                 {
-                    element = root.FindFirst(System.Windows.Automation.TreeScope.Descendants,
-                        new System.Windows.Automation.PropertyCondition(
-                            System.Windows.Automation.AutomationElement.AutomationIdProperty, node.AutomationId));
-                    if (element != null) matchMethod = $"AutomationId={node.AutomationId}";
-                }
-
-                // 策略2: Name 精确匹配
-                if (element == null && !string.IsNullOrEmpty(node.ElementName))
-                {
-                    element = root.FindFirst(System.Windows.Automation.TreeScope.Descendants,
-                        new System.Windows.Automation.PropertyCondition(
-                            System.Windows.Automation.AutomationElement.NameProperty, node.ElementName));
-                    if (element != null) matchMethod = $"Name={node.ElementName}";
-                }
-
-                // 策略3: ClassName + ControlType 组合
-                if (element == null && !string.IsNullOrEmpty(node.ClassName) && !string.IsNullOrEmpty(node.ControlType))
-                {
-                    var ct = System.Windows.Automation.ControlType.LookupById(GetControlTypeId(node.ControlType));
-                    if (ct != null)
+                    try
                     {
-                        var andCond = new System.Windows.Automation.AndCondition(
-                            new System.Windows.Automation.PropertyCondition(
-                                System.Windows.Automation.AutomationElement.ClassNameProperty, node.ClassName),
-                            new System.Windows.Automation.PropertyCondition(
-                                System.Windows.Automation.AutomationElement.ControlTypeProperty, ct));
-                        element = root.FindFirst(System.Windows.Automation.TreeScope.Descendants, andCond);
-                        if (element != null) matchMethod = $"ClassName={node.ClassName}+ControlType={node.ControlType}";
+                        element = FindByXPath(root, node.XPath);
+                        if (element != null)
+                        {
+                            matchMethod = $"XPath={Trunc(node.XPath, 60)}";
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warn("Player", $"XPath 查找异常: {ex.Message}");
                     }
                 }
 
-                // 策略4: 单独 ClassName
+                // 策略2: AutomationId 精确匹配
+                if (element == null && !string.IsNullOrEmpty(node.AutomationId))
+                {
+                    element = root.FindFirstDescendant(_cf.ByAutomationId(node.AutomationId));
+                    if (element != null) matchMethod = $"AutomationId={node.AutomationId}";
+                }
+
+                // 策略3: Name + ControlType + SiblingIndex
+                if (element == null && !string.IsNullOrEmpty(node.ElementName))
+                {
+                    try
+                    {
+                        var controlType = ParseControlType(node.ControlType);
+                        if (controlType != null)
+                        {
+                            var allMatches = root.FindAllDescendants(
+                                _cf.ByName(node.ElementName).And(_cf.ByControlType(controlType.Value)));
+                            if (allMatches.Length > 0)
+                            {
+                                int idx = Math.Min(node.SiblingIndex, allMatches.Length - 1);
+                                element = allMatches[idx];
+                                matchMethod = $"Name={node.ElementName}+ControlType={node.ControlType}[{idx}]";
+                            }
+                        }
+                        else
+                        {
+                            // 仅 Name 匹配
+                            var allMatches = root.FindAllDescendants(_cf.ByName(node.ElementName));
+                            if (allMatches.Length > 0)
+                            {
+                                int idx = Math.Min(node.SiblingIndex, allMatches.Length - 1);
+                                element = allMatches[idx];
+                                matchMethod = $"Name={node.ElementName}[{idx}]";
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warn("Player", $"Name+ControlType 查找异常: {ex.Message}");
+                    }
+                }
+
+                // 策略4: ClassName + ControlType
                 if (element == null && !string.IsNullOrEmpty(node.ClassName))
                 {
-                    element = root.FindFirst(System.Windows.Automation.TreeScope.Descendants,
-                        new System.Windows.Automation.PropertyCondition(
-                            System.Windows.Automation.AutomationElement.ClassNameProperty, node.ClassName));
-                    if (element != null) matchMethod = $"ClassName={node.ClassName}";
+                    try
+                    {
+                        var controlType = ParseControlType(node.ControlType);
+                        if (controlType != null)
+                        {
+                            element = root.FindFirstDescendant(
+                                _cf.ByClassName(node.ClassName).And(_cf.ByControlType(controlType.Value)));
+                            if (element != null) matchMethod = $"ClassName={node.ClassName}+ControlType={node.ControlType}";
+                        }
+                        else
+                        {
+                            element = root.FindFirstDescendant(_cf.ByClassName(node.ClassName));
+                            if (element != null) matchMethod = $"ClassName={node.ClassName}";
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warn("Player", $"ClassName 查找异常: {ex.Message}");
+                    }
                 }
 
                 if (element == null)
                 {
-                    OnLog($"UIA 未找到: Name=\"{node.ElementName}\" Class=\"{node.ClassName}\" AutoId=\"{node.AutomationId}\"");
+                    OnLog($"UIA 未找到: Name=\"{node.ElementName}\" Class=\"{node.ClassName}\" AutoId=\"{node.AutomationId}\"" +
+                          (!string.IsNullOrEmpty(node.XPath) ? $" XPath=\"{node.XPath}\"" : ""));
                     return (false, hwnd, default);
                 }
 
-                var rect = element.Current.BoundingRectangle;
+                var rect = element.BoundingRectangle;
                 OnLog($"定位成功 ({matchMethod}) 坐标({rect.Left:F0},{rect.Top:F0})");
-                return (true, hwnd, rect);
+                return (true, hwnd, new System.Windows.Rect(rect.X, rect.Y, rect.Width, rect.Height));
             }
             catch (Exception ex)
             {
                 OnLog($"UIA 异常: {ex.Message}");
                 return (false, IntPtr.Zero, default);
             }
+        }
+
+        /// <summary>
+        /// 通过自定义 XPath 字符串查找元素。
+        /// 解析 XPath 路径（如 /Window[@Name='微信']/Pane/Button[@Name='发送'][2]），
+        /// 从根元素逐级向下查找，支持跳过中间容器元素。
+        /// </summary>
+        private AutomationElement FindByXPath(AutomationElement root, string xpath)
+        {
+            if (string.IsNullOrEmpty(xpath)) return null;
+
+            // 移除前导 / 或 //
+            string path = xpath.TrimStart('/');
+            bool isDeep = xpath.StartsWith("//");
+
+            var segments = ParseXPathSegments(path);
+            if (segments.Count == 0) return null;
+
+            AutomationElement current = root;
+
+            // 第一级：检查根元素是否匹配第一个段
+            if (!isDeep && segments.Count > 0)
+            {
+                var firstSeg = segments[0];
+                if (MatchesSegment(current, firstSeg))
+                {
+                    // 根匹配，从第二级开始逐级查找
+                    for (int i = 1; i < segments.Count; i++)
+                    {
+                        var child = FindDescendantBySegment(current, segments[i]);
+                        if (child == null) return null;
+                        current = child;
+                    }
+                    return current;
+                }
+            }
+
+            // // 开头或根不匹配：在任意深度查找匹配段序列的元素
+            return FindByXPathDeep(root, segments);
+        }
+
+        /// <summary>
+        /// 在子树中递归查找匹配 XPath 段序列的元素
+        /// </summary>
+        private AutomationElement FindByXPathDeep(AutomationElement root, List<XPathSegment> segments)
+        {
+            if (segments.Count == 0) return null;
+
+            // 在所有后代中查找匹配第一段的元素
+            var candidates = FindAllMatchingDescendants(root, segments[0]);
+            foreach (var candidate in candidates)
+            {
+                if (segments.Count == 1) return candidate;
+
+                // 递归匹配后续段
+                var result = FindByPathFromParent(candidate, segments, 1);
+                if (result != null) return result;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 从指定父元素开始，按 XPath 段逐级查找（允许跳过中间容器）
+        /// </summary>
+        private AutomationElement FindByPathFromParent(AutomationElement parent, List<XPathSegment> segments, int startIndex)
+        {
+            AutomationElement current = parent;
+            for (int i = startIndex; i < segments.Count; i++)
+            {
+                var child = FindDescendantBySegment(current, segments[i]);
+                if (child == null) return null;
+                current = child;
+            }
+            return current;
+        }
+
+        /// <summary>
+        /// 在后代元素中查找匹配指定段的元素（先查直接子元素，再查更深层后代）。
+        /// 这比仅查直接子元素更健壮，因为 UI 树中常有中间容器元素。
+        /// </summary>
+        private AutomationElement FindDescendantBySegment(AutomationElement parent, XPathSegment segment)
+        {
+            try
+            {
+                // 1. 先在直接子元素中查找（最精确，遵循 XPath 路径）
+                var children = parent.FindAllChildren();
+                var matches = new List<AutomationElement>();
+
+                foreach (var child in children)
+                {
+                    if (MatchesSegment(child, segment))
+                        matches.Add(child);
+                }
+
+                if (matches.Count > 0)
+                {
+                    int idx = segment.Index > 0 ? Math.Min(segment.Index - 1, matches.Count - 1) : 0;
+                    return matches[idx];
+                }
+
+                // 2. 直接子元素未找到，在更深层后代中查找（跳过中间容器）
+                // 使用 FlaUI 的 FindAllDescendants + 属性条件提高效率
+                var descendantMatches = FindAllMatchingDescendants(parent, segment);
+                if (descendantMatches.Count > 0)
+                {
+                    int idx = segment.Index > 0 ? Math.Min(segment.Index - 1, descendantMatches.Count - 1) : 0;
+                    OnLog($"XPath: 在后代中找到 {descendantMatches.Count} 个匹配（跳过中间容器）");
+                    return descendantMatches[idx];
+                }
+
+                return null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// 在所有后代中查找匹配指定段的元素
+        /// </summary>
+        private List<AutomationElement> FindAllMatchingDescendants(AutomationElement root, XPathSegment segment)
+        {
+            var results = new List<AutomationElement>();
+            try
+            {
+                // 优先使用 FlaUI 条件查找（更高效）
+                var controlType = ParseControlType(segment.ControlType);
+                if (controlType != null)
+                {
+                    // 如果有 Name 属性，使用 ControlType + Name 组合条件
+                    if (segment.Attributes.TryGetValue("Name", out string name) && !string.IsNullOrEmpty(name))
+                    {
+                        var found = root.FindAllDescendants(
+                            _cf.ByControlType(controlType.Value).And(_cf.ByName(name)));
+                        foreach (var elem in found)
+                        {
+                            if (MatchesSegment(elem, segment))
+                                results.Add(elem);
+                        }
+                    }
+                    else
+                    {
+                        // 仅 ControlType 条件
+                        var found = root.FindAllDescendants(_cf.ByControlType(controlType.Value));
+                        foreach (var elem in found)
+                        {
+                            if (MatchesSegment(elem, segment))
+                                results.Add(elem);
+                        }
+                    }
+                }
+                else
+                {
+                    // 无法解析 ControlType，遍历所有后代
+                    var descendants = root.FindAllDescendants();
+                    foreach (var desc in descendants)
+                    {
+                        if (MatchesSegment(desc, segment))
+                            results.Add(desc);
+                    }
+                }
+            }
+            catch { }
+            return results;
+        }
+
+        /// <summary>
+        /// 检查元素是否匹配 XPath 段
+        /// </summary>
+        private bool MatchesSegment(AutomationElement element, XPathSegment segment)
+        {
+            try
+            {
+                // ControlType 匹配
+                string ctName = element.ControlType.ToString();
+                if (!string.Equals(ctName, segment.ControlType, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                // 属性匹配
+                if (segment.Attributes.Count == 0) return true;
+
+                foreach (var attr in segment.Attributes)
+                {
+                    bool attrMatch = attr.Key.ToLower() switch
+                    {
+                        "automationid" => TryGetPropertyValue(element.AutomationId, attr.Value),
+                        "name" => TryGetPropertyValue(element.Name, attr.Value),
+                        "classname" => TryGetPropertyValue(element.ClassName, attr.Value),
+                        _ => true // 未知属性不阻止匹配
+                    };
+                    if (!attrMatch) return false;
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// 尝试比较元素属性值与期望值。
+        /// 如果属性无法获取（异常），视为不匹配。
+        /// </summary>
+        private static bool TryGetPropertyValue(string actualValue, string expectedValue)
+        {
+            try
+            {
+                return actualValue == expectedValue;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 解析 XPath 字符串为段列表
+        /// </summary>
+        private List<XPathSegment> ParseXPathSegments(string xpath)
+        {
+            var segments = new List<XPathSegment>();
+            if (string.IsNullOrEmpty(xpath)) return segments;
+
+            // 按 / 分割（排除转义的 /）
+            var parts = xpath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var part in parts)
+            {
+                var seg = new XPathSegment();
+                string remaining = part.Trim();
+
+                // 提取最后的索引 [n]（仅数字索引，非属性谓词）
+                var idxMatch = System.Text.RegularExpressions.Regex.Match(remaining, @"\[(\d+)\]$");
+                if (idxMatch.Success)
+                {
+                    seg.Index = int.Parse(idxMatch.Groups[1].Value);
+                    remaining = remaining[..idxMatch.Index].Trim();
+                }
+
+                // 提取 ControlType（谓词前的部分）和属性谓词
+                var predMatch = System.Text.RegularExpressions.Regex.Match(remaining, @"^(\w+)(\[.+\])?$");
+                if (predMatch.Success)
+                {
+                    seg.ControlType = predMatch.Groups[1].Value;
+
+                    if (predMatch.Groups[2].Success)
+                    {
+                        string predicates = predMatch.Groups[2].Value.Trim('[', ']');
+                        // 解析 @Attr='Value' 对
+                        foreach (System.Text.RegularExpressions.Match m in
+                            System.Text.RegularExpressions.Regex.Matches(predicates, @"@(\w+)='([^']*)'"))
+                        {
+                            seg.Attributes[m.Groups[1].Value] = m.Groups[2].Value;
+                        }
+                    }
+                }
+                else
+                {
+                    seg.ControlType = remaining;
+                }
+
+                if (!string.IsNullOrEmpty(seg.ControlType))
+                    segments.Add(seg);
+            }
+
+            return segments;
+        }
+
+        /// <summary>
+        /// XPath 段数据结构
+        /// </summary>
+        private class XPathSegment
+        {
+            public string ControlType { get; set; } = "";
+            public Dictionary<string, string> Attributes { get; set; } = new();
+            public int Index { get; set; } // 0 = 无索引, 1+ = 1-based
+        }
+
+        /// <summary>
+        /// 将字符串 ControlType 解析为 FlaUI ControlType 枚举
+        /// </summary>
+        private static FlaUI.Core.Definitions.ControlType? ParseControlType(string controlType)
+        {
+            if (string.IsNullOrEmpty(controlType)) return null;
+
+            return controlType switch
+            {
+                "Button" => FlaUI.Core.Definitions.ControlType.Button,
+                "Calendar" => FlaUI.Core.Definitions.ControlType.Calendar,
+                "CheckBox" => FlaUI.Core.Definitions.ControlType.CheckBox,
+                "ComboBox" => FlaUI.Core.Definitions.ControlType.ComboBox,
+                "Edit" => FlaUI.Core.Definitions.ControlType.Edit,
+                "Hyperlink" => FlaUI.Core.Definitions.ControlType.Hyperlink,
+                "Image" => FlaUI.Core.Definitions.ControlType.Image,
+                "ListItem" => FlaUI.Core.Definitions.ControlType.ListItem,
+                "List" => FlaUI.Core.Definitions.ControlType.List,
+                "Menu" => FlaUI.Core.Definitions.ControlType.Menu,
+                "MenuBar" => FlaUI.Core.Definitions.ControlType.MenuBar,
+                "MenuItem" => FlaUI.Core.Definitions.ControlType.MenuItem,
+                "ProgressBar" => FlaUI.Core.Definitions.ControlType.ProgressBar,
+                "RadioButton" => FlaUI.Core.Definitions.ControlType.RadioButton,
+                "ScrollBar" => FlaUI.Core.Definitions.ControlType.ScrollBar,
+                "Slider" => FlaUI.Core.Definitions.ControlType.Slider,
+                "Spinner" => FlaUI.Core.Definitions.ControlType.Spinner,
+                "StatusBar" => FlaUI.Core.Definitions.ControlType.StatusBar,
+                "Tab" => FlaUI.Core.Definitions.ControlType.Tab,
+                "TabItem" => FlaUI.Core.Definitions.ControlType.TabItem,
+                "Text" => FlaUI.Core.Definitions.ControlType.Text,
+                "ToolBar" => FlaUI.Core.Definitions.ControlType.ToolBar,
+                "ToolTip" => FlaUI.Core.Definitions.ControlType.ToolTip,
+                "Tree" => FlaUI.Core.Definitions.ControlType.Tree,
+                "TreeItem" => FlaUI.Core.Definitions.ControlType.TreeItem,
+                "DataGrid" => FlaUI.Core.Definitions.ControlType.DataGrid,
+                "DataItem" => FlaUI.Core.Definitions.ControlType.DataItem,
+                "Document" => FlaUI.Core.Definitions.ControlType.Document,
+                "SplitButton" => FlaUI.Core.Definitions.ControlType.SplitButton,
+                "Window" => FlaUI.Core.Definitions.ControlType.Window,
+                "Pane" => FlaUI.Core.Definitions.ControlType.Pane,
+                "Header" => FlaUI.Core.Definitions.ControlType.Header,
+                "HeaderItem" => FlaUI.Core.Definitions.ControlType.HeaderItem,
+                "Table" => FlaUI.Core.Definitions.ControlType.Table,
+                "Thumb" => FlaUI.Core.Definitions.ControlType.Thumb,
+                "Group" => FlaUI.Core.Definitions.ControlType.Group,
+                "Custom" => FlaUI.Core.Definitions.ControlType.Custom,
+                _ => null
+            };
         }
 
         /// <summary>
@@ -495,52 +885,6 @@ namespace WeChatAutomation.Core.Recording
             User32.EnumWindows(callback, IntPtr.Zero);
             return found;
         }
-
-        private static int GetControlTypeId(string controlType) => controlType switch
-        {
-            "Button" => 50000,
-            "Calendar" => 50001,
-            "CheckBox" => 50002,
-            "ComboBox" => 50003,
-            "Edit" => 50004,
-            "Hyperlink" => 50005,
-            "Image" => 50006,
-            "ListItem" => 50007,
-            "List" => 50008,
-            "Menu" => 50009,
-            "MenuBar" => 50010,
-            "MenuItem" => 50011,
-            "ProgressBar" => 50012,
-            "RadioButton" => 50013,
-            "ScrollBar" => 50014,
-            "Slider" => 50015,
-            "Spinner" => 50016,
-            "StatusBar" => 50017,
-            "Tab" => 50018,
-            "TabItem" => 50019,
-            "Text" => 50020,
-            "ToolBar" => 50021,
-            "ToolTip" => 50022,
-            "Tree" => 50023,
-            "TreeItem" => 50024,
-            "DataGrid" => 50028,
-            "DataItem" => 50029,
-            "Document" => 50030,
-            "SplitButton" => 50031,
-            "Window" => 50032,
-            "Pane" => 50033,
-            "Header" => 50034,
-            "HeaderItem" => 50035,
-            "Table" => 50036,
-            "Thumbnail" => 50050,
-            "Graphic" => 50051,
-            "StaticText" => 50052,
-            "Unknown" => 50053,
-            "OutlookBar" => 50054,
-            "SemanticZoom" => 50055,
-            "AppBar" => 50056,
-            _ => 50000 // 默认 Button
-        };
 
         private async Task DoTypeTextAsync(string text)
         {
@@ -649,7 +993,7 @@ namespace WeChatAutomation.Core.Recording
                     title = sb.ToString();
                 }
 
-                var element = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
+                var element = _automation.FromHandle(hwnd);
                 string content = ExtractAllText(element, 0, 5);
 
                 var result = new ReadContentResult
@@ -704,7 +1048,7 @@ namespace WeChatAutomation.Core.Recording
                 User32.SendInput(1, new[] { scrollInput }, System.Runtime.InteropServices.Marshal.SizeOf<User32.INPUT>());
                 await Task.Delay(500);
 
-                var element = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
+                var element = _automation.FromHandle(hwnd);
                 string content = ExtractAllText(element, 0, 5);
 
                 var result = new ReadContentResult
@@ -740,32 +1084,37 @@ namespace WeChatAutomation.Core.Recording
         }
 
         /// <summary>
-        /// 递归提取 UIA 元素的所有文本
+        /// 递归提取 UIA 元素的所有文本（FlaUI 版本）
         /// </summary>
-        private string ExtractAllText(System.Windows.Automation.AutomationElement element, int depth, int maxDepth)
+        private string ExtractAllText(AutomationElement element, int depth, int maxDepth)
         {
             if (depth > maxDepth || element == null) return "";
 
             var texts = new List<string>();
             try
             {
-                // 获取当前元素的名称（通常是文本内容）
-                string name = element.Current.Name;
+                // 获取当前元素的名称
+                string name = "";
+                try { name = element.Name ?? ""; } catch { }
                 if (!string.IsNullOrWhiteSpace(name))
                     texts.Add(name);
 
                 // 获取 ValuePattern 的值
-                if (element.TryGetCurrentPattern(System.Windows.Automation.ValuePattern.Pattern, out object patternObj))
+                try
                 {
-                    var vp = (System.Windows.Automation.ValuePattern)patternObj;
-                    string val = vp.Current.Value;
-                    if (!string.IsNullOrWhiteSpace(val) && val != name)
-                        texts.Add(val);
+                    var valuePattern = element.Patterns.Value.PatternOrDefault;
+                    if (valuePattern != null)
+                    {
+                        string val = valuePattern.Value.Value ?? "";
+                        if (!string.IsNullOrWhiteSpace(val) && val != name)
+                            texts.Add(val);
+                    }
                 }
+                catch { /* ValuePattern 不可用则忽略 */ }
 
                 // 递归子元素
-                var children = element.FindAll(System.Windows.Automation.TreeScope.Children, System.Windows.Automation.Condition.TrueCondition);
-                foreach (System.Windows.Automation.AutomationElement child in children)
+                var children = element.FindAllChildren();
+                foreach (var child in children)
                 {
                     string childText = ExtractAllText(child, depth + 1, maxDepth);
                     if (!string.IsNullOrWhiteSpace(childText))
@@ -799,7 +1148,7 @@ namespace WeChatAutomation.Core.Recording
                     title = sb.ToString();
                 }
 
-                var element = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
+                var element = _automation.FromHandle(hwnd);
                 string content = ExtractAllText(element, 0, 5);
 
                 if (string.IsNullOrEmpty(content))
@@ -985,7 +1334,10 @@ namespace WeChatAutomation.Core.Recording
                 RegexGroup = node.RegexGroup,
                 OutputParamName = node.OutputParamName,
                 IsEnabled = node.IsEnabled,
-                CreatedAt = node.CreatedAt
+                CreatedAt = node.CreatedAt,
+                XPath = ResolveStr(node.XPath),
+                SiblingIndex = node.SiblingIndex,
+                RuntimeId = node.RuntimeId
             };
             return resolved;
         }

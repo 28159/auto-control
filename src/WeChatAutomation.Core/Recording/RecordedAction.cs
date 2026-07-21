@@ -54,6 +54,11 @@ namespace WeChatAutomation.Core.Recording
         public string? VisionLabel { get; set; }
         public float VisionConfThreshold { get; set; } = 0.3f;
 
+        // UIA 路径标识
+        public string? XPath { get; set; }          // 祖先链 XPath，如 /Window[@Name='微信']/Pane/Button[@Name='发送']
+        public int SiblingIndex { get; set; }       // 同级索引（0-based），XPath 中 [n] 消歧
+        public string? RuntimeId { get; set; }      // RuntimeId 逗号分隔字符串，辅助标识
+
         // 参数
         public string Parameter { get; set; } = "";
         public int DelayMs { get; set; } = 300;
@@ -79,7 +84,9 @@ namespace WeChatAutomation.Core.Recording
                 ? $"点击坐标({X:F0},{Y:F0})"
                 : ClickMode == ClickMode.Vision
                     ? $"视觉点击 {VisionLabel ?? "未知"}"
-                    : $"点击路径 {ElementName ?? ClassName ?? AutomationId ?? "未知"}",
+                    : !string.IsNullOrEmpty(XPath)
+                        ? $"路径点击 {Trunc(XPath, 40)}"
+                        : $"点击路径 {ElementName ?? ClassName ?? AutomationId ?? "未知"}",
             ActionType.TypeText => $"输入 \"{Trunc(Parameter, 20)}\"",
             ActionType.SendKeys => $"按键 {Parameter}",
             ActionType.Wait => $"等待 {Parameter}ms",

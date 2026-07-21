@@ -6,7 +6,6 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using System.Windows.Automation;
 using WeChatAutomation.Core.Logging;
 using WeChatAutomation.Core.Native;
 using WeChatAutomation.Core.Vision;
@@ -72,27 +71,75 @@ namespace WeChatAutomation.Core.Recording
             "maximize_button", "scrollbar", "slider", "toggle", "tooltip", "image"
         };
 
+        /// <summary>
+        /// 扩展的 ControlType → VisionLabel 映射表
+        /// </summary>
+        private static readonly Dictionary<string, string> ExtendedControlTypeMapping = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Button"] = "button",
+            ["SplitButton"] = "button",
+            ["Edit"] = "input",
+            ["Text"] = "text_field",
+            ["CheckBox"] = "checkbox",
+            ["RadioButton"] = "radio",
+            ["ComboBox"] = "dropdown",
+            ["TabItem"] = "tab",
+            ["Tab"] = "tab",
+            ["MenuItem"] = "menu_item",
+            ["Menu"] = "menu_item",
+            ["MenuBar"] = "menu_item",
+            ["Hyperlink"] = "link",
+            ["Image"] = "image",
+            ["ToolBar"] = "search_box",
+            ["ScrollBar"] = "scrollbar",
+            ["Slider"] = "slider",
+            ["ToolTip"] = "tooltip",
+            ["ListItem"] = "button",
+            ["DataItem"] = "button",
+            ["TreeItem"] = "button",
+            ["DataGrid"] = "input",
+            ["Document"] = "text_field",
+            ["Spinner"] = "input",
+            ["StatusBar"] = "text_field",
+            ["Header"] = "text_field",
+            ["HeaderItem"] = "button",
+            ["Table"] = "text_field",
+            ["Pane"] = "text_field",
+            ["Window"] = "text_field",
+        };
+
         private static string ControlTypeToVisionLabel(string controlType)
         {
             if (string.IsNullOrEmpty(controlType)) return "button";
 
+            // 1. 精确映射
+            if (ExtendedControlTypeMapping.TryGetValue(controlType, out string label))
+                return label;
+
+            // 2. 原有映射表（兼容旧逻辑）
             if (ControlTypeToClassId.TryGetValue(controlType, out int id) && id < YoloClassNames.Length)
                 return YoloClassNames[id];
 
-            return controlType.ToLower() switch
-            {
-                "button" or "splitbutton" => "button",
-                "edit" or "input" or "text" => "input",
-                "checkbox" => "checkbox",
-                "radio" or "radiobutton" => "radio",
-                "combo" or "combobox" or "dropdown" or "select" => "dropdown",
-                "tab" or "tabitem" => "tab",
-                "menu" or "menuitem" => "menu_item",
-                "image" or "picture" or "icon" => "icon",
-                "hyperlink" or "link" => "link",
-                "toolbar" => "search_box",
-                _ => "button"
-            };
+            // 3. 模糊匹配
+            string lower = controlType.ToLower();
+            if (lower.Contains("button") || lower.Contains("btn")) return "button";
+            if (lower.Contains("edit") || lower.Contains("input") || lower.Contains("text")) return "input";
+            if (lower.Contains("check")) return "checkbox";
+            if (lower.Contains("radio")) return "radio";
+            if (lower.Contains("combo") || lower.Contains("dropdown") || lower.Contains("select")) return "dropdown";
+            if (lower.Contains("tab")) return "tab";
+            if (lower.Contains("menu")) return "menu_item";
+            if (lower.Contains("link") || lower.Contains("hyper")) return "link";
+            if (lower.Contains("image") || lower.Contains("picture")) return "image";
+            if (lower.Contains("scroll")) return "scrollbar";
+            if (lower.Contains("slide")) return "slider";
+            if (lower.Contains("toggle")) return "toggle";
+            if (lower.Contains("tip")) return "tooltip";
+            if (lower.Contains("search")) return "search_box";
+
+            // 4. 最终回退：记录警告
+            _logger.Warn("Recorder", $"未识别的 ControlType '{controlType}'，回退到 'button'");
+            return "button";
         }
 
         public bool IsRecording => _isRecording;
@@ -302,7 +349,9 @@ namespace WeChatAutomation.Core.Recording
                 ? $"点击坐标({info.X},{info.Y})"
                 : CurrentClickMode == ClickMode.Vision
                     ? $"视觉点击 {visionLabel}"
-                    : $"点击路径 {desc}";
+                    : !string.IsNullOrEmpty(info.XPath)
+                        ? $"路径点击 {(info.XPath.Length > 40 ? info.XPath[..40] + "..." : info.XPath)}"
+                        : $"点击路径 {desc}";
 
             _nodes.Add(new RecordedAction
             {
@@ -318,7 +367,10 @@ namespace WeChatAutomation.Core.Recording
                 Y = info.Y,
                 DelayMs = delay,
                 ClickMode = CurrentClickMode,
-                VisionLabel = CurrentClickMode == ClickMode.Vision ? visionLabel : null
+                VisionLabel = CurrentClickMode == ClickMode.Vision ? visionLabel : null,
+                XPath = info.XPath,
+                SiblingIndex = info.SiblingIndex,
+                RuntimeId = info.RuntimeId
             });
 
             if (_captureTrainingData && info.WindowHandle != IntPtr.Zero)
@@ -326,7 +378,8 @@ namespace WeChatAutomation.Core.Recording
                 SaveTrainingCapture(info);
             }
 
-            OnLog($"录制点击 #{_nodes.Count}: {desc} ({CurrentClickMode})");
+            OnLog($"录制点击 #{_nodes.Count}: {desc} ({CurrentClickMode})" +
+                  (!string.IsNullOrEmpty(info.XPath) ? $" XPath={info.XPath}" : ""));
             NodeRecorded?.Invoke(this, _nodes[^1]);
         }
 
