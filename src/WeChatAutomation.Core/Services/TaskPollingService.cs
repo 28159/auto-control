@@ -95,13 +95,13 @@ namespace WeChatAutomation.Core.Services
         {
             if (_isRunning) return Task.CompletedTask;
 
-            // 自动启动时检查配置，手动启动时跳过
+            // 自动启动时检查 AutoStart 配置，手动启动时跳过
             if (checkConfig)
             {
-                var enabled = _configuration.GetValue("TaskPolling:Enabled", false);
-                if (!enabled)
+                var autoStart = _configuration.GetValue("TaskPolling:AutoStart", false);
+                if (!autoStart)
                 {
-                    _logger.Info("TaskPolling", "任务轮询服务已禁用");
+                    _logger.Info("TaskPolling", "任务轮询服务未设置自动启动");
                     return Task.CompletedTask;
                 }
             }
@@ -691,7 +691,10 @@ namespace WeChatAutomation.Core.Services
         public string Status { get; set; }
 
         [JsonPropertyName("created_at")]
-        public DateTime? CreatedAt { get; set; }
+        public string CreatedAt { get; set; }
+
+        [JsonPropertyName("scheduled_at")]
+        public string ScheduledAt { get; set; }
     }
 
     public class RemoteTaskExecutionResult

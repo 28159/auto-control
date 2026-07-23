@@ -1979,6 +1979,7 @@ namespace WeChatAutomation.App
                 var currentPoll = config.GetValue("TaskPolling:PollIntervalSeconds", 10);
                 var currentHeartbeat = config.GetValue("TaskPolling:HeartbeatIntervalSeconds", 30);
                 var currentClientId = App.TaskPolling?.ClientId ?? config.GetValue("TaskPolling:ClientId", "");
+                var currentAutoStart = config.GetValue("TaskPolling:AutoStart", false);
 
                 var w = new Window
                 {
@@ -2010,6 +2011,10 @@ namespace WeChatAutomation.App
                 var clientIdBox = new TextBox { Text = currentClientId, Margin = new Thickness(0, 0, 0, 3), ToolTip = "客户端唯一标识，留空自动生成" };
                 sp.Children.Add(clientIdBox);
                 sp.Children.Add(new TextBlock { Text = "留空自动生成并持久化到 client_id.txt", FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 8) });
+
+                // 自动开启
+                var autoStartCheckBox = new CheckBox { Content = "自动开启轮询（应用启动后自动运行）", IsChecked = currentAutoStart, Margin = new Thickness(0, 0, 0, 8) };
+                sp.Children.Add(autoStartCheckBox);
 
                 // 当前状态
                 if (App.TaskPolling?.IsRunning == true)
@@ -2056,12 +2061,18 @@ namespace WeChatAutomation.App
                             {
                                 writer.WritePropertyName("TaskPolling");
                                 writer.WriteStartObject();
-                                writer.WriteBoolean("Enabled", true);
+                                writer.WriteBoolean("AutoStart", autoStartCheckBox.IsChecked == true);
                                 writer.WriteString("ServerUrl", newUrl);
                                 if (int.TryParse(pollBox.Text, out int pi)) writer.WriteNumber("PollIntervalSeconds", pi);
                                 if (int.TryParse(heartbeatBox.Text, out int hi)) writer.WriteNumber("HeartbeatIntervalSeconds", hi);
                                 var cid = clientIdBox.Text.Trim();
                                 if (!string.IsNullOrEmpty(cid)) writer.WriteString("ClientId", cid);
+                                // 保留 TaskTypeMapping
+                                if (prop.Value.TryGetProperty("TaskTypeMapping", out var mapping))
+                                {
+                                    writer.WritePropertyName("TaskTypeMapping");
+                                    mapping.WriteTo(writer);
+                                }
                                 writer.WriteEndObject();
                             }
                             else
@@ -2074,7 +2085,7 @@ namespace WeChatAutomation.App
                         {
                             writer.WritePropertyName("TaskPolling");
                             writer.WriteStartObject();
-                            writer.WriteBoolean("Enabled", true);
+                            writer.WriteBoolean("AutoStart", autoStartCheckBox.IsChecked == true);
                             writer.WriteString("ServerUrl", newUrl);
                             if (int.TryParse(pollBox.Text, out int pi)) writer.WriteNumber("PollIntervalSeconds", pi);
                             if (int.TryParse(heartbeatBox.Text, out int hi)) writer.WriteNumber("HeartbeatIntervalSeconds", hi);

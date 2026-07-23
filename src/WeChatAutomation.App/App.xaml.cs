@@ -77,11 +77,11 @@ public partial class App : Application
             _logger.Info("App", "MCP Server 已启动");
         }
 
-        var taskPollingEnabled = Configuration.GetValue("TaskPolling:Enabled", false);
-        if (taskPollingEnabled)
+        var taskPollingAutoStart = Configuration.GetValue("TaskPolling:AutoStart", false);
+        if (taskPollingAutoStart)
         {
-            _ = TaskPolling.StartAsync(CancellationToken.None);
-            _logger.Info("App", "任务轮询服务已启动");
+            _ = TaskPolling.StartManual(CancellationToken.None);
+            _logger.Info("App", "任务轮询服务已自动启动");
         }
 
         _logger.Info("App", "应用已启动");
