@@ -35,6 +35,7 @@ namespace WeChatAutomation.Core.Services
         public string ScriptName { get; set; }
         public DateTime ExecutedAt { get; set; }
         public List<ReadContentResult> ReadResults { get; set; } = new();
+        public List<VisionDetectionResult> VisionResults { get; set; } = new();
     }
 
     public class ScriptInfo

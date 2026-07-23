@@ -735,6 +735,18 @@ namespace WeChatAutomation.App
                 return;
             }
 
+            if (node.ActionType == ActionType.If)
+            {
+                ShowEditIfDialog(node);
+                return;
+            }
+
+            if (node.ActionType == ActionType.Goto)
+            {
+                ShowEditGotoDialog(node);
+                return;
+            }
+
             var w = new Window
             {
                 Title = $"编辑步骤 #{node.Order}",
@@ -763,6 +775,23 @@ namespace WeChatAutomation.App
             sp.Children.Add(new TextBlock { Text = "参数:", Margin = new Thickness(0, 0, 0, 3) });
             var paramBox = new TextBox { Text = node.Parameter ?? "", Margin = new Thickness(0, 0, 0, 8), TextWrapping = TextWrapping.Wrap, AcceptsReturn = true, MaxHeight = 80 };
             sp.Children.Add(paramBox);
+
+            // 输出变量名（阅读/滚动阅读/正则识别步骤存内容；点击步骤存点击是否成功 true/false）
+            var outputVarPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            outputVarPanel.Children.Add(new TextBlock { Text = "输出变量名 (阅读/正则存内容，点击存成功状态 true/false；留空=不存变量):", Margin = new Thickness(0, 0, 0, 3), FontSize = 11 });
+            var outputVarBox = new TextBox { Text = node.OutputParamName ?? "", ToolTip = "阅读/正则: 内容/匹配值存入此变量；点击: 成功存 true 失败存 false。后续判断步骤可用 {变量名} 引用。点击结果同时写入固定变量 {last_click_success}" };
+            outputVarPanel.Children.Add(outputVarBox);
+            sp.Children.Add(outputVarPanel);
+
+            // 打开全部同名窗口（仅切窗步骤用）
+            var switchAllCheck = new CheckBox
+            {
+                Content = "打开全部同名窗口（切窗步骤用，恢复显示所有匹配窗口）",
+                IsChecked = node.SwitchAll,
+                Margin = new Thickness(0, 0, 0, 8),
+                ToolTip = "勾选后切窗会把该进程名的所有窗口都恢复显示并置顶；不勾选只切换主窗口"
+            };
+            sp.Children.Add(switchAllCheck);
 
             sp.Children.Add(new TextBlock { Text = "延时(毫秒):", Margin = new Thickness(0, 0, 0, 3) });
             var delayBox = new TextBox { Text = node.DelayMs.ToString(), Margin = new Thickness(0, 0, 0, 8), Width = 100, HorizontalAlignment = HorizontalAlignment.Left };
@@ -817,6 +846,8 @@ namespace WeChatAutomation.App
                 if (Enum.TryParse<WeChatAutomation.Core.Recording.ClickMode>(clickModeCombo.SelectedItem?.ToString(), out var cm)) node.ClickMode = cm;
                 node.VisionLabel = visionLabelBox.Text.Trim();
                 if (float.TryParse(visionConfBox.Text, out float vc) && vc > 0) node.VisionConfThreshold = vc;
+                node.OutputParamName = string.IsNullOrWhiteSpace(outputVarBox.Text) ? null : outputVarBox.Text.Trim();
+                node.SwitchAll = switchAllCheck.IsChecked == true;
                 w.DialogResult = true;
             };
 
@@ -825,6 +856,151 @@ namespace WeChatAutomation.App
                 RefreshGrid();
                 AppendLog($"编辑步骤 #{node.Order}: {node.ActionType} {node.Name}");
             }
+        }
+
+        private void ShowEditIfDialog(RecordedAction node)
+        {
+            var w = new Window
+            {
+                Title = $"编辑判断步骤 #{node.Order}",
+                Width = 420, SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this, ResizeMode = ResizeMode.NoResize
+            };
+
+            var sp = new StackPanel { Margin = new Thickness(15) };
+
+            // 收集可用变量
+            var availableVars = new List<string>();
+            foreach (var step in _steps)
+            {
+                if (!string.IsNullOrEmpty(step.OutputParamName) && !availableVars.Contains(step.OutputParamName))
+                    availableVars.Add(step.OutputParamName);
+            }
+            // 点击步骤会写入固定变量 last_click_success（true/false），有点击步骤时加入可选
+            if (_steps.Any(s => s.ActionType == ActionType.Click))
+                availableVars.Add("last_click_success");
+
+            // 判断来源变量
+            sp.Children.Add(new TextBlock { Text = "判断来源变量 (可选):", Margin = new Thickness(0, 0, 0, 3) });
+            sp.Children.Add(new TextBlock
+            {
+                Text = "选择阅读/正则步骤输出的变量，或点击步骤的 last_click_success。留空条件表达式时，判断该变量是否有值。",
+                FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 3), TextWrapping = TextWrapping.Wrap
+            });
+            var sourceVarCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8), IsEditable = true };
+            sourceVarCombo.Items.Add("(无)");
+            int srcSel = 0;
+            for (int i = 0; i < availableVars.Count; i++)
+            {
+                sourceVarCombo.Items.Add(availableVars[i]);
+                if (availableVars[i] == node.OutputParamName) srcSel = i + 1;
+            }
+            sourceVarCombo.SelectedIndex = srcSel;
+            sp.Children.Add(sourceVarCombo);
+
+            sp.Children.Add(new TextBlock { Text = "条件表达式 (可选):", Margin = new Thickness(0, 0, 0, 3) });
+            var exprBox = new TextBox { Text = node.ConditionExpression ?? "", Margin = new Thickness(0, 0, 0, 8) };
+            sp.Children.Add(exprBox);
+
+            // 条件成立时执行的子脚本
+            sp.Children.Add(new TextBlock { Text = "条件成立时执行的脚本 (可选):", Margin = new Thickness(0, 0, 0, 3) });
+            sp.Children.Add(new TextBlock
+            {
+                Text = "条件成立->执行该子脚本并停止当前脚本；条件不成立->停止当前脚本。留空用旧跳转模式。",
+                FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 3), TextWrapping = TextWrapping.Wrap
+            });
+            var targetScriptCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8), IsEditable = true };
+            targetScriptCombo.Items.Add("(无)");
+            int tgtSel = 0;
+            for (int i = 0; i < _scripts.Count; i++)
+            {
+                targetScriptCombo.Items.Add(_scripts[i].Name);
+                if (_scripts[i].Name == node.TargetScript) tgtSel = i + 1;
+            }
+            // 若当前 TargetScript 不在列表（手动输入的），补一项
+            if (!string.IsNullOrEmpty(node.TargetScript) && tgtSel == 0)
+            {
+                targetScriptCombo.Items.Add(node.TargetScript);
+                tgtSel = targetScriptCombo.Items.Count - 1;
+            }
+            targetScriptCombo.SelectedIndex = tgtSel;
+            sp.Children.Add(targetScriptCombo);
+
+            var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            var ok = new Button { Content = "确定", IsDefault = true, Padding = new Thickness(15, 5, 15, 5), FontWeight = FontWeights.Bold };
+            var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(8, 0, 0, 0) };
+            bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
+
+            w.Content = sp;
+
+            ok.Click += (_, _) =>
+            {
+                string sourceVar = sourceVarCombo.SelectedIndex > 0
+                    ? (sourceVarCombo.SelectedItem as string ?? sourceVarCombo.Text.Trim())
+                    : sourceVarCombo.Text.Trim();
+                if (sourceVar == "(无)" || string.IsNullOrEmpty(sourceVar)) sourceVar = null;
+
+                string targetScript = targetScriptCombo.SelectedIndex > 0
+                    ? (targetScriptCombo.SelectedItem as string ?? targetScriptCombo.Text.Trim())
+                    : targetScriptCombo.Text.Trim();
+                if (targetScript == "(无)" || string.IsNullOrEmpty(targetScript)) targetScript = null;
+
+                node.ConditionExpression = string.IsNullOrWhiteSpace(exprBox.Text) ? null : exprBox.Text.Trim();
+                node.OutputParamName = sourceVar;
+                node.TargetScript = targetScript;
+                string dispName = !string.IsNullOrEmpty(node.ConditionExpression)
+                    ? node.ConditionExpression
+                    : (!string.IsNullOrEmpty(sourceVar) ? $"变量 {{{sourceVar}}} 是否有值" : "判断");
+                if (!string.IsNullOrEmpty(targetScript)) dispName += $" ->脚本:{targetScript}";
+                node.Name = $"判断: {dispName}";
+                w.DialogResult = true;
+            };
+
+            if (w.ShowDialog() == true) { RefreshGrid(); AppendLog($"编辑判断步骤 #{node.Order}"); }
+        }
+
+        private void ShowEditGotoDialog(RecordedAction node)
+        {
+            if (_steps.Count == 0) { AppendLog("没有步骤可跳转"); return; }
+
+            var w = new Window
+            {
+                Title = $"编辑跳转步骤 #{node.Order}",
+                Width = 350, SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this, ResizeMode = ResizeMode.NoResize
+            };
+
+            var sp = new StackPanel { Margin = new Thickness(15) };
+
+            sp.Children.Add(new TextBlock { Text = "跳转目标:", Margin = new Thickness(0, 0, 0, 3) });
+            var targetCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8) };
+            int sel = 0;
+            for (int i = 0; i < _steps.Count; i++)
+            {
+                targetCombo.Items.Add($"#{_steps[i].Order} [{_steps[i].NodeId}] {_steps[i].Summary}");
+                if (_steps[i].NodeId == node.GotoNodeId) sel = i;
+            }
+            targetCombo.SelectedIndex = sel;
+            sp.Children.Add(targetCombo);
+
+            var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            var ok = new Button { Content = "确定", IsDefault = true, Padding = new Thickness(15, 5, 15, 5), FontWeight = FontWeights.Bold };
+            var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(8, 0, 0, 0) };
+            bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
+
+            w.Content = sp;
+
+            ok.Click += (_, _) =>
+            {
+                var target = _steps[targetCombo.SelectedIndex];
+                node.GotoNodeId = target.NodeId;
+                node.Name = $"跳转 -> #{target.Order} {target.Summary}";
+                w.DialogResult = true;
+            };
+
+            if (w.ShowDialog() == true) { RefreshGrid(); AppendLog($"编辑跳转步骤 #{node.Order}"); }
         }
 
         private void ShowEditInputParamDialog(RecordedAction node)
@@ -1154,6 +1330,46 @@ namespace WeChatAutomation.App
             File.Delete(script.FilePath);
             if (_currentScript == script) { _currentScript = null; CurrentScriptText.Text = "(未命名)"; _steps.Clear(); StepCountText.Text = "0"; }
             LoadScriptsList();
+        }
+
+        private void CopyScript_Click(object s, RoutedEventArgs e)
+        {
+            if (ScriptsListBox.SelectedItem is not ScriptInfo script) { MessageBox.Show("请先选择脚本"); return; }
+
+            try
+            {
+                var rec = ActionRecorder.LoadFromFile(script.FilePath);
+                if (rec == null) { MessageBox.Show("无法加载脚本"); return; }
+
+                string defaultName = rec.Name + "_副本";
+                var name = ShowInput("复制脚本", "新脚本名称:", defaultName);
+                if (string.IsNullOrWhiteSpace(name)) return;
+                if (!IsValidScriptName(name)) { MessageBox.Show("名称包含非法字符"); return; }
+
+                // 重名时自动加时间戳后缀（与 ImportScript_Click 一致）
+                var destPath = Path.Combine(_scriptsDir, $"{name}.json");
+                if (File.Exists(destPath))
+                {
+                    name = $"{name}_{DateTime.Now:MMdd_HHmmss}";
+                    destPath = Path.Combine(_scriptsDir, $"{name}.json");
+                }
+
+                var opt = new System.Text.Json.JsonSerializerOptions
+                {
+                    WriteIndented = true,
+                    Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
+                };
+                rec.Name = name;
+                File.WriteAllText(destPath, System.Text.Json.JsonSerializer.Serialize(rec, opt));
+
+                LoadScriptsList();
+                ScriptsListBox.SelectedItem = _scripts.FirstOrDefault(x => x.Name == name);
+                AppendLog($"已复制脚本: {script.Name} -> {name}");
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"复制脚本失败: {ex.Message}");
+            }
         }
 
         private void ExportScript_Click(object s, RoutedEventArgs e)
@@ -2272,6 +2488,274 @@ namespace WeChatAutomation.App
                 PlayBtn.IsEnabled = _steps.Count > 0;
                 AppendLog($"已添加参数步骤: {param.Name}");
             }
+        }
+
+        private void AddIf_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                var w = new Window
+                {
+                    Title = "添加判断步骤",
+                    Width = 420, SizeToContent = SizeToContent.Height,
+                    WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                    Owner = this, ResizeMode = ResizeMode.NoResize
+                };
+
+                var sp = new StackPanel { Margin = new Thickness(15) };
+
+                // 收集脚本中所有可用的变量名（来自阅读/正则步骤的 OutputParamName）
+                var availableVars = new List<string>();
+                foreach (var step in _steps)
+                {
+                    if (!string.IsNullOrEmpty(step.OutputParamName) && !availableVars.Contains(step.OutputParamName))
+                        availableVars.Add(step.OutputParamName);
+                }
+                // 点击步骤会写入固定变量 last_click_success（true/false），有点击步骤时加入可选
+                if (_steps.Any(s => s.ActionType == ActionType.Click))
+                    availableVars.Add("last_click_success");
+
+                // 判断来源变量（便捷模式：直接判断该变量是否有值）
+                sp.Children.Add(new TextBlock { Text = "判断来源变量 (可选):", Margin = new Thickness(0, 0, 0, 3) });
+                sp.Children.Add(new TextBlock
+                {
+                    Text = "选择阅读/正则步骤输出的变量，或点击步骤的 last_click_success。留空条件表达式时，判断该变量是否有值；填了条件表达式时，用 {变量名} 引用。",
+                    FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 3), TextWrapping = TextWrapping.Wrap
+                });
+                var sourceVarCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8), IsEditable = true };
+                sourceVarCombo.Items.Add("(无)");
+                foreach (var v in availableVars)
+                    sourceVarCombo.Items.Add(v);
+                sourceVarCombo.SelectedIndex = 0;
+                sp.Children.Add(sourceVarCombo);
+
+                // 条件表达式
+                sp.Children.Add(new TextBlock { Text = "条件表达式 (可选):", Margin = new Thickness(0, 0, 0, 3) });
+                sp.Children.Add(new TextBlock
+                {
+                    Text = "示例: {last_click_success} == true   {found} == true   {count} > 0   {content} contains '已添加'   {text} matches '\\d+'",
+                    FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 3), TextWrapping = TextWrapping.Wrap
+                });
+                var exprBox = new TextBox { Margin = new Thickness(0, 0, 0, 8), ToolTip = "判断条件，支持 == != > < >= <= contains matches。留空则按上方'判断来源变量'是否有值判断" };
+                sp.Children.Add(exprBox);
+
+                // 条件成立时执行的子脚本（新行为：执行该脚本后停止当前脚本，不执行后续）
+                sp.Children.Add(new TextBlock { Text = "条件成立时执行的脚本 (可选):", Margin = new Thickness(0, 0, 0, 3) });
+                sp.Children.Add(new TextBlock
+                {
+                    Text = "条件成立->执行该子脚本（继承当前参数）并停止当前脚本后续步骤；条件不成立->直接停止当前脚本。留空则用旧的跳转分支模式。",
+                    FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 3), TextWrapping = TextWrapping.Wrap
+                });
+                var targetScriptCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8), IsEditable = true };
+                targetScriptCombo.Items.Add("(无)");
+                foreach (var sc in _scripts)
+                    targetScriptCombo.Items.Add(sc.Name);
+                targetScriptCombo.SelectedIndex = 0;
+                sp.Children.Add(targetScriptCombo);
+
+                // 按钮
+                var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+                var ok = new Button { Content = "添加", IsDefault = true, Padding = new Thickness(12, 5, 12, 5) };
+                var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(8, 0, 0, 0) };
+                bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
+
+                w.Content = sp;
+
+                ok.Click += (_, _) =>
+                {
+                    string expr = exprBox.Text.Trim();
+                    string sourceVar = sourceVarCombo.SelectedIndex > 0
+                        ? (sourceVarCombo.SelectedItem as string ?? sourceVarCombo.Text.Trim())
+                        : sourceVarCombo.Text.Trim();
+                    if (sourceVar == "(无)" || string.IsNullOrEmpty(sourceVar)) sourceVar = null;
+
+                    if (string.IsNullOrEmpty(expr) && string.IsNullOrEmpty(sourceVar))
+                    {
+                        MessageBox.Show("请填写条件表达式或选择判断来源变量");
+                        return;
+                    }
+
+                    // 目标脚本：条件成立时执行的子脚本
+                    string targetScript = targetScriptCombo.SelectedIndex > 0
+                        ? (targetScriptCombo.SelectedItem as string ?? targetScriptCombo.Text.Trim())
+                        : targetScriptCombo.Text.Trim();
+                    if (targetScript == "(无)" || string.IsNullOrEmpty(targetScript)) targetScript = null;
+
+                    string displayName = !string.IsNullOrEmpty(expr) ? expr : $"变量 {{{sourceVar}}} 是否有值";
+                    if (!string.IsNullOrEmpty(targetScript)) displayName += $" ->脚本:{targetScript}";
+                    var node = new RecordedAction
+                    {
+                        Order = _steps.Count + 1,
+                        ActionType = ActionType.If,
+                        Name = $"判断: {displayName}",
+                        ConditionExpression = string.IsNullOrEmpty(expr) ? null : expr,
+                        OutputParamName = sourceVar,
+                        TargetScript = targetScript
+                    };
+                    _recorder.AddManual(node);
+                    RefreshGrid();
+                    PlayBtn.IsEnabled = _steps.Count > 0;
+                    AppendLog($"已添加判断步骤: {displayName}");
+                    w.DialogResult = true;
+                };
+
+                w.ShowDialog();
+            }
+            catch (Exception ex) { AppendLog($"添加判断步骤失败: {ex.Message}"); }
+        }
+
+        private void AddGoto_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_steps.Count == 0) { AppendLog("没有步骤可跳转"); return; }
+
+                var w = new Window
+                {
+                    Title = "添加跳转步骤",
+                    Width = 350, SizeToContent = SizeToContent.Height,
+                    WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                    Owner = this, ResizeMode = ResizeMode.NoResize
+                };
+
+                var sp = new StackPanel { Margin = new Thickness(15) };
+
+                sp.Children.Add(new TextBlock { Text = "跳转目标:", Margin = new Thickness(0, 0, 0, 3) });
+                var targetCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8) };
+                foreach (var step in _steps)
+                    targetCombo.Items.Add($"#{step.Order} [{step.NodeId}] {step.Summary}");
+                targetCombo.SelectedIndex = 0;
+                sp.Children.Add(targetCombo);
+
+                var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+                var ok = new Button { Content = "添加", IsDefault = true, Padding = new Thickness(12, 5, 12, 5) };
+                var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(8, 0, 0, 0) };
+                bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
+
+                w.Content = sp;
+
+                ok.Click += (_, _) =>
+                {
+                    var targetStep = _steps[targetCombo.SelectedIndex];
+                    var node = new RecordedAction
+                    {
+                        Order = _steps.Count + 1,
+                        ActionType = ActionType.Goto,
+                        Name = $"跳转 → #{targetStep.Order} {targetStep.Summary}",
+                        GotoNodeId = targetStep.NodeId
+                    };
+                    _recorder.AddManual(node);
+                    RefreshGrid();
+                    PlayBtn.IsEnabled = _steps.Count > 0;
+                    AppendLog($"已添加跳转步骤 → #{targetStep.Order}");
+                    w.DialogResult = true;
+                };
+
+                w.ShowDialog();
+            }
+            catch (Exception ex) { AppendLog($"添加跳转步骤失败: {ex.Message}"); }
+        }
+
+        private void AddSwitchToWindow_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                // 切窗专用选择器：带"打开全部同名窗口"开关
+                var (processName, switchAll) = ShowSwitchWindowPicker();
+                if (string.IsNullOrEmpty(processName)) return;
+
+                var node = new RecordedAction
+                {
+                    Order = _steps.Count + 1,
+                    ActionType = ActionType.SwitchToWindow,
+                    Name = switchAll ? $"打开全部窗口: {processName}" : $"切换窗口: {processName}",
+                    WindowTitle = processName,
+                    Parameter = processName,
+                    SwitchAll = switchAll
+                };
+                _recorder.AddManual(node);
+                RefreshGrid();
+                PlayBtn.IsEnabled = _steps.Count > 0;
+                AppendLog($"已添加切窗步骤: {processName}{(switchAll ? " (打开全部)" : "")}");
+            }
+            catch (Exception ex) { AppendLog($"添加切窗步骤失败: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// 切窗步骤专用窗口选择器，返回 (进程名, 是否打开全部同名窗口)
+        /// </summary>
+        private (string, bool) ShowSwitchWindowPicker()
+        {
+            var w = new Window
+            {
+                Title = "切换窗口", Width = 380, SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this, ResizeMode = ResizeMode.NoResize
+            };
+
+            var sp = new StackPanel { Margin = new Thickness(12) };
+
+            sp.Children.Add(new TextBlock { Text = "选择已运行的进程，或手动输入进程名:", Margin = new Thickness(0, 0, 0, 8), FontWeight = FontWeights.Bold });
+
+            // 进程下拉框
+            var combo = new ComboBox { Margin = new Thickness(0, 0, 0, 8), DisplayMemberPath = "Display" };
+            var processes = System.Diagnostics.Process.GetProcesses()
+                .Where(p => !string.IsNullOrEmpty(p.MainWindowTitle) || p.ProcessName is not ("Idle" or "System" or "csrss" or "smss" or "lsass" or "wininit" or "services" or "svchost" or "dwm" or "conhost"))
+                .OrderBy(p => p.ProcessName)
+                .Select(p => new { Display = $"{p.ProcessName} - {p.MainWindowTitle}", Name = p.ProcessName })
+                .DistinctBy(p => p.Name)
+                .ToList();
+            combo.ItemsSource = processes;
+            if (processes.Count > 0) combo.SelectedIndex = 0;
+            sp.Children.Add(combo);
+
+            sp.Children.Add(new TextBlock { Text = "或手动输入进程名:", Margin = new Thickness(0, 0, 0, 3) });
+            var manualBox = new TextBox { Margin = new Thickness(0, 0, 0, 8), ToolTip = "如 notepad, chrome, Weixin" };
+            sp.Children.Add(manualBox);
+
+            // 打开全部开关
+            var switchAllCheck = new CheckBox
+            {
+                Content = "打开全部同名窗口（恢复显示所有匹配窗口并置顶）",
+                Margin = new Thickness(0, 4, 0, 8),
+                ToolTip = "勾选后，会把该进程名的所有窗口都恢复显示并置顶；不勾选则只切换主窗口到前台"
+            };
+            sp.Children.Add(switchAllCheck);
+
+            // 按钮
+            var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            var ok = new Button { Content = "确定", IsDefault = true, Padding = new Thickness(15, 5, 15, 5), FontWeight = FontWeights.Bold };
+            var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(8, 0, 0, 0) };
+            bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
+
+            w.Content = sp;
+
+            string result = null;
+            ok.Click += (_, _) =>
+            {
+                if (!string.IsNullOrWhiteSpace(manualBox.Text))
+                    result = manualBox.Text.Trim();
+                else if (combo.SelectedItem != null)
+                    result = ((dynamic)combo.SelectedItem).Name;
+                w.DialogResult = true;
+            };
+
+            return w.ShowDialog() == true ? (result, switchAllCheck.IsChecked == true) : (null, false);
+        }
+
+        private void FlowChartBtn_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                var chart = new FlowChartWindow(_recorder, _player, _currentClickMode, _currentVisionModel)
+                {
+                    Owner = this
+                };
+                chart.ShowDialog();
+                RefreshGrid();
+                PlayBtn.IsEnabled = _steps.Count > 0;
+            }
+            catch (Exception ex) { AppendLog($"打开流程图失败: {ex.Message}"); }
         }
 
         private void ParseCommand_Click(object s, RoutedEventArgs e)

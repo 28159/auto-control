@@ -34,7 +34,8 @@
                     <WrapPanel Grid.Row="1" Margin="0,0,0,6">
                         <Button Content="新建" Click="NewScript_Click" Padding="8,3" Margin="0,0,3,0" FontSize="11"/>
                         <Button Content="编辑" Click="EditScriptInfo_Click" Padding="8,3" Margin="0,0,3,0" FontSize="11"/>
-                        <Button Content="删除" Click="DeleteScript_Click" Padding="8,3" FontSize="11" Foreground="Red"/>
+                        <Button Content="复制" Click="CopyScript_Click" Padding="8,3" Margin="0,0,3,0" FontSize="11"/>
+                        <Button Content="删除" Click="DeleteScript_Click" Padding="8,3" Margin="0,0,3,0" FontSize="11" Foreground="Red"/>
                         <Button Content="导出" Click="ExportScript_Click" Padding="8,3" Margin="0,0,3,0" FontSize="11"/>
                         <Button Content="导入" Click="ImportScript_Click" Padding="8,3" FontSize="11"/>
                     </WrapPanel>
@@ -137,6 +138,7 @@
                         </StackPanel>
 
                         <StackPanel Grid.Column="2" Orientation="Horizontal">
+                            <Button Content="📊 流程图" Click="FlowChartBtn_Click" Padding="10,6" Margin="0,0,3,0" ToolTip="打开流程图视图"/>
                             <Button Content="⚙ 参数" Click="ManageParams_Click" Padding="10,6" Margin="0,0,3,0"/>
                             <Button x:Name="InspectBtn" Content="🔍 检查" Click="InspectBtn_Click" Padding="10,6" Margin="0,0,3,0"
                                     Background="#7B1FA2" Foreground="White" FontWeight="Bold" ToolTip="F12 窗口检查模式 - 鼠标悬停查看窗口信息"/>
@@ -208,6 +210,9 @@
                                 <Button Content="🔍正则" Click="AddRegexMatch_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="正则识别屏幕内容"/>
                                 <Button Content="🖱滚动" Click="AddScroll_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
                                 <Button Content="📝参数" Click="AddInputParam_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="添加动态输入参数"/>
+                                <Button Content="🔀判断" Click="AddIf_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="条件判断分支"/>
+                                <Button Content="↩跳转" Click="AddGoto_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="跳转到指定步骤"/>
+                                <Button Content="🪟切窗" Click="AddSwitchToWindow_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="切换窗口到前台"/>
                                 <Separator Margin="4,0"/>
                                 <TextBlock Text="🤖" VerticalAlignment="Center" FontSize="11"/>
                                 <TextBox x:Name="CommandInput" Width="160" VerticalAlignment="Center" FontSize="11"

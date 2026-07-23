@@ -34,7 +34,8 @@ namespace WeChatAutomation.Core.Services
                     Success = true,
                     Message = "执行完成",
                     ExecutedAt = DateTime.Now,
-                    ReadResults = _player.ReadResults.ToList()
+                    ReadResults = _player.ReadResults.ToList(),
+                    VisionResults = _player.VisionResults.ToList()
                 };
                 ExecutionCompleted?.Invoke(this, result);
             };
@@ -48,6 +49,76 @@ namespace WeChatAutomation.Core.Services
                 };
                 ExecutionCompleted?.Invoke(this, result);
             };
+            // 订阅子脚本请求：If-TargetScript 条件成立时执行子脚本（继承当前参数）
+            _player.SubScriptRequested += (s, scriptName) =>
+            {
+                bool ok = ExecuteSubScriptSync(scriptName, _player.CurrentParameters);
+                _player.ReportSubScriptResult(ok);
+            };
+        }
+
+        /// <summary>
+        /// 同步执行子脚本（供 If-TargetScript 调用，不走信号量，复用主 player 的上下文）。
+        /// 用临时 ActionPlayer 执行，避免与主脚本 Play 冲突。
+        /// </summary>
+        private bool ExecuteSubScriptSync(string scriptName, Dictionary<string, string>? parameters)
+        {
+            try
+            {
+                var filePath = Path.Combine(_scriptsDir, $"{scriptName}.json");
+                if (!File.Exists(filePath))
+                {
+                    _logger.Warn("Executor", $"子脚本不存在: {scriptName}");
+                    LogMessage?.Invoke(this, $"子脚本不存在: {scriptName}");
+                    return false;
+                }
+
+                var recordingFile = ActionRecorder.LoadFromFile(filePath);
+                if (recordingFile?.Actions == null || recordingFile.Actions.Count == 0)
+                {
+                    _logger.Warn("Executor", $"子脚本为空: {scriptName}");
+                    return false;
+                }
+
+                // 参数解析（继承主脚本参数）
+                var subParams = parameters;
+                if (subParams != null && subParams.Count > 0 && recordingFile.Parameters?.Count > 0)
+                    subParams = ResolveParameterIds(subParams, recordingFile.Parameters);
+
+                var actions = recordingFile.Actions.ToList();
+                if (subParams != null && subParams.Count > 0)
+                    actions = ReplaceParameters(actions, subParams);
+
+                _logger.Info("Executor", $"开始执行子脚本: {scriptName}");
+                LogMessage?.Invoke(this, $"── 执行子脚本: {scriptName} ──");
+
+                // 用临时 player 执行子脚本，避免与主 player 的 _isPlaying 冲突
+                using var subPlayer = new ActionPlayer();
+                subPlayer.LogMessage += (s2, msg) => LogMessage?.Invoke(this, msg);
+                subPlayer.CurrentParameters = subParams;
+
+                if (actions.Any(a => a.ClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision))
+                    subPlayer.EnsureVisionModel(recordingFile.VisionModel);
+
+                // 复制主脚本的阅读目标到子脚本（若主脚本设置了 PickTargetWindow）
+                // 子脚本通常应自行指定窗口，这里不复制以保持隔离
+
+                subPlayer.Play(actions, recordingFile.VisionModel).GetAwaiter().GetResult();
+
+                // 合并子脚本的读取/视觉结果到主结果
+                foreach (var r in subPlayer.ReadResults) _player.AppendReadResult(r);
+                foreach (var v in subPlayer.VisionResults) _player.AppendVisionResult(v);
+
+                _logger.Info("Executor", $"子脚本执行完成: {scriptName}");
+                LogMessage?.Invoke(this, $"── 子脚本完成: {scriptName} ──");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.Error("Executor", $"执行子脚本失败: {scriptName}", ex);
+                LogMessage?.Invoke(this, $"子脚本执行失败: {ex.Message}");
+                return false;
+            }
         }
 
         public async Task<ExecuteResult> ExecuteScript(string scriptName, Dictionary<string, string> parameters = null)
@@ -109,6 +180,9 @@ namespace WeChatAutomation.Core.Services
                     _player.EnsureVisionModel(recordingFile.VisionModel);
                 }
 
+                // 设置当前参数供 If-TargetScript 子脚本继承
+                _player.CurrentParameters = parameters;
+
                 _currentCts = new CancellationTokenSource();
                 await _player.Play(actions, recordingFile.VisionModel);
 
@@ -118,7 +192,8 @@ namespace WeChatAutomation.Core.Services
                     Message = "执行完成",
                     ScriptName = scriptName,
                     ExecutedAt = DateTime.Now,
-                    ReadResults = _player.ReadResults.ToList()
+                    ReadResults = _player.ReadResults.ToList(),
+                    VisionResults = _player.VisionResults.ToList()
                 };
             }
             catch (Exception ex)
@@ -247,6 +322,11 @@ namespace WeChatAutomation.Core.Services
                     RegexPattern = action.RegexPattern,
                     RegexGroup = action.RegexGroup,
                     OutputParamName = action.OutputParamName,
+                    ConditionExpression = action.ConditionExpression,
+                    GotoNodeId = action.GotoNodeId,
+                    TrueGotoNodeId = action.TrueGotoNodeId,
+                    TargetScript = action.TargetScript,
+                    SwitchAll = action.SwitchAll,
                     IsEnabled = action.IsEnabled,
                     CreatedAt = action.CreatedAt
                 };
@@ -256,6 +336,8 @@ namespace WeChatAutomation.Core.Services
                     newAction.Parameter = newAction.Parameter.Replace($"{{{kvp.Key}}}", kvp.Value);
                     newAction.Name = newAction.Name.Replace($"{{{kvp.Key}}}", kvp.Value);
                     newAction.WindowTitle = newAction.WindowTitle?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.ConditionExpression = newAction.ConditionExpression?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.TargetScript = newAction.TargetScript?.Replace($"{{{kvp.Key}}}", kvp.Value);
                 }
 
                 if (newAction.ActionType == ActionType.InputParam && newAction.CopyToClipboard)

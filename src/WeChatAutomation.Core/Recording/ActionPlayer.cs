@@ -31,6 +31,8 @@ namespace WeChatAutomation.Core.Recording
         public bool IsPlaying => _isPlaying;
         private readonly List<ReadContentResult> _readResults = new();
         public IReadOnlyList<ReadContentResult> ReadResults => _readResults;
+        private readonly List<VisionDetectionResult> _visionResults = new();
+        public IReadOnlyList<VisionDetectionResult> VisionResults => _visionResults;
 
         /// <summary>
         /// 设置目标窗口句柄（用于阅读功能）
@@ -102,6 +104,53 @@ namespace WeChatAutomation.Core.Recording
         public event EventHandler<string> PlayError;
 
         /// <summary>
+        /// If 步骤条件成立且设置了 TargetScript 时触发，ScriptExecutor 订阅执行子脚本。
+        /// 参数为子脚本名。子脚本继承当前参数（通过 ScriptExecutor.ExecuteScript 传入）。
+        /// </summary>
+        public event EventHandler<string>? SubScriptRequested;
+
+        /// <summary>
+        /// 当前回放脚本收到的参数（由 ScriptExecutor 设置，供子脚本继承）。
+        /// </summary>
+        public Dictionary<string, string>? CurrentParameters { get; set; }
+
+        /// <summary>请求停止当前脚本后续步骤（由 If-TargetScript 逻辑设置）</summary>
+        private bool _stopRequested;
+
+        /// <summary>子脚本执行结果（SubScriptRequested 处理方回填），null=未执行/执行失败</summary>
+        private bool? _subScriptSuccess;
+
+        /// <summary>
+        /// 执行子脚本：触发 SubScriptRequested 事件，由 ScriptExecutor 订阅执行。
+        /// 子脚本继承当前参数（CurrentParameters）。返回子脚本是否成功。
+        /// </summary>
+        private bool ExecuteSubScript(string scriptName)
+        {
+            try
+            {
+                _subScriptSuccess = null;
+                SubScriptRequested?.Invoke(this, scriptName);
+                return _subScriptSuccess == true;
+            }
+            catch (Exception ex)
+            {
+                OnLog($"执行子脚本异常: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 供 SubScriptRequested 订阅方回填子脚本执行结果。
+        /// </summary>
+        public void ReportSubScriptResult(bool success) => _subScriptSuccess = success;
+
+        /// <summary>供 ScriptExecutor 合并子脚本的阅读结果到主结果</summary>
+        public void AppendReadResult(ReadContentResult r) => _readResults.Add(r);
+
+        /// <summary>供 ScriptExecutor 合并子脚本的视觉检测结果到主结果</summary>
+        public void AppendVisionResult(VisionDetectionResult v) => _visionResults.Add(v);
+
+        /// <summary>
         /// 当前回放脚本绑定的视觉模型文件名（来自 RecordingFile.VisionModel）。
         /// 为空时 EnsureVisionModel 回退到默认 yolov8n-ui.onnx。
         /// </summary>
@@ -117,36 +166,63 @@ namespace WeChatAutomation.Core.Recording
             _cts = new CancellationTokenSource();
             _readResults.Clear();
             _variables.Clear();
+            _visionResults.Clear();
+            _stopRequested = false;
+            _subScriptSuccess = null;
             // 注意：不清除 _targetWindow 和 _targetElement，它们是用户通过 PickTargetWindow 选择的阅读目标
             OnLog($"开始回放，共 {nodes.Count} 步" +
                   (string.IsNullOrEmpty(visionModelFileName) ? "" : $"（视觉模型: {visionModelFileName}）"));
 
+            // 构建 NodeId → 索引映射，供 If/Goto 跳转使用
+            var nodeIndexMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < nodes.Count; i++)
+                if (!string.IsNullOrEmpty(nodes[i].NodeId))
+                    nodeIndexMap[nodes[i].NodeId] = i;
+
             try
             {
-                foreach (var node in nodes)
+                int currentIndex = 0;
+                int iterations = 0;
+                const int maxIterations = 10000; // 防止死循环
+
+                while (currentIndex < nodes.Count && iterations++ < maxIterations)
                 {
                     if (_cts.IsCancellationRequested) break;
-                    if (!node.IsEnabled) continue;
+                    if (_stopRequested) break; // If-TargetScript 请求停止后续步骤
+                    var node = nodes[currentIndex];
+                    if (!node.IsEnabled) { currentIndex++; continue; }
                     if (node.DelayMs > 0) await Task.Delay(node.DelayMs, _cts.Token);
-                    await ExecuteNode(node);
+
+                    int? jumpTo = await ExecuteNode(node, nodeIndexMap);
+                    currentIndex = jumpTo.HasValue ? jumpTo.Value : currentIndex + 1;
                 }
-                if (!_cts.IsCancellationRequested) { OnLog("回放完成"); PlayCompleted?.Invoke(this, EventArgs.Empty); }
+
+                if (_stopRequested)
+                    OnLog(_subScriptSuccess == true ? "已执行子脚本并停止当前脚本" : "已停止当前脚本后续步骤");
+                else if (iterations >= maxIterations)
+                    OnLog($"回放达到最大迭代次数 ({maxIterations})，可能存在死循环，已中止");
+
+                if (!_cts.IsCancellationRequested && !_stopRequested && iterations < maxIterations)
+                { OnLog("回放完成"); PlayCompleted?.Invoke(this, EventArgs.Empty); }
             }
             catch (OperationCanceledException) { OnLog("回放已取消"); }
             catch (Exception ex) { OnLog($"回放异常: {ex.Message}"); PlayError?.Invoke(this, ex.Message); }
             finally { _isPlaying = false; _cts?.Dispose(); _cts = null; }
         }
 
-        private async Task ExecuteNode(RecordedAction node)
+        private async Task<int?> ExecuteNode(RecordedAction node, Dictionary<string, int> nodeIndexMap)
         {
             var resolvedNode = ResolveVariables(node);
 
             switch (resolvedNode.ActionType)
             {
                 case ActionType.Click:
-                    await DoClickAsync(resolvedNode);
-                    OnLog($"点击 {resolvedNode.ElementName ?? resolvedNode.ClassName ?? $"({resolvedNode.X:F0},{resolvedNode.Y:F0})"}");
-                    break;
+                    {
+                        bool clickOk = await DoClickAsync(resolvedNode);
+                        RecordClickResult(resolvedNode, clickOk);
+                        OnLog($"点击 {resolvedNode.ElementName ?? resolvedNode.ClassName ?? $"({resolvedNode.X:F0},{resolvedNode.Y:F0})"} -> {(clickOk ? "成功" : "失败")}");
+                        break;
+                    }
 
                 case ActionType.TypeText:
                     await DoTypeTextAsync(resolvedNode.Parameter);
@@ -192,11 +268,11 @@ namespace WeChatAutomation.Core.Recording
                     break;
 
                 case ActionType.ReadContent:
-                    DoReadContent(resolvedNode.WindowTitle);
+                    DoReadContent(resolvedNode);
                     break;
 
                 case ActionType.ScrollRead:
-                    await DoScrollReadAsync(resolvedNode.ScrollAmount, resolvedNode.WindowTitle);
+                    await DoScrollReadAsync(resolvedNode.ScrollAmount, resolvedNode.WindowTitle, resolvedNode.OutputParamName);
                     break;
 
                 case ActionType.Scroll:
@@ -223,35 +299,101 @@ namespace WeChatAutomation.Core.Recording
                     DoRegexMatch(resolvedNode);
                     break;
 
+                case ActionType.If:
+                    {
+                        // 便捷模式：条件表达式为空但设置了 OutputParamName，直接判断该变量（阅读/正则内容）是否有值
+                        string? ifExpr = resolvedNode.ConditionExpression;
+                        bool condResult;
+                        if (string.IsNullOrWhiteSpace(ifExpr) && !string.IsNullOrEmpty(resolvedNode.OutputParamName))
+                        {
+                            string val = GetVariable(resolvedNode.OutputParamName) ?? "";
+                            OnLog($"判断变量 {{{resolvedNode.OutputParamName}}} 是否有值: [{Trunc(val, 30)}]");
+                            condResult = !string.IsNullOrWhiteSpace(val)
+                                && !val.Equals("0", StringComparison.OrdinalIgnoreCase)
+                                && !val.Equals("false", StringComparison.OrdinalIgnoreCase);
+                        }
+                        else
+                        {
+                            condResult = EvaluateCondition(ifExpr);
+                            OnLog($"判断: {Trunc(ifExpr ?? "", 40)} -> {(condResult ? "true" : "false")}");
+                        }
+
+                        // 新模式：设置了 TargetScript 时，成立->执行子脚本并停止；不成立->直接停止
+                        if (!string.IsNullOrEmpty(resolvedNode.TargetScript))
+                        {
+                            if (condResult)
+                            {
+                                OnLog($"  -> 条件成立，执行子脚本: {resolvedNode.TargetScript}（执行完停止当前脚本）");
+                                _subScriptSuccess = ExecuteSubScript(resolvedNode.TargetScript);
+                                _stopRequested = true;
+                            }
+                            else
+                            {
+                                OnLog($"  -> 条件不成立，停止当前脚本后续步骤");
+                                _stopRequested = true;
+                            }
+                            return null;
+                        }
+
+                        // 旧模式：跳转目标
+                        if (condResult && !string.IsNullOrEmpty(node.TrueGotoNodeId)
+                            && nodeIndexMap.TryGetValue(node.TrueGotoNodeId, out int trueIdx))
+                        {
+                            OnLog($"  -> 跳转到 true 分支: {node.TrueGotoNodeId}");
+                            return trueIdx;
+                        }
+                        else if (!condResult && !string.IsNullOrEmpty(node.GotoNodeId)
+                            && nodeIndexMap.TryGetValue(node.GotoNodeId, out int falseIdx))
+                        {
+                            OnLog($"  -> 跳转到 false 分支: {node.GotoNodeId}");
+                            return falseIdx;
+                        }
+                        // 无跳转目标则继续下一步
+                        break;
+                    }
+
+                case ActionType.Goto:
+                    if (!string.IsNullOrEmpty(node.GotoNodeId) && nodeIndexMap.TryGetValue(node.GotoNodeId, out int targetIdx))
+                    {
+                        OnLog($"跳转 → {node.GotoNodeId} (索引 {targetIdx})");
+                        return targetIdx;
+                    }
+                    OnLog($"跳转失败: 未找到目标节点 {node.GotoNodeId}");
+                    break;
+
+                case ActionType.SwitchToWindow:
+                    DoSwitchToWindow(resolvedNode);
+                    break;
+
                 default:
                     OnLog($"未知操作类型: {resolvedNode.ActionType}");
                     break;
             }
+
+            return null; // 继续下一步
         }
 
-        private async Task DoClickAsync(RecordedAction node)
+        private async Task<bool> DoClickAsync(RecordedAction node)
         {
             if (node.ClickMode == ClickMode.Vision)
             {
-                await DoClickByVisionAsync(node);
-                return;
+                return await DoClickByVisionAsync(node);
             }
 
             if (node.ClickMode == ClickMode.Coordinate)
             {
-                await DoClickByCoordinateAsync(node);
-                return;
+                return await DoClickByCoordinateAsync(node);
             }
 
-            await DoClickByUIAPathAsync(node);
+            return await DoClickByUIAPathAsync(node);
         }
 
-        private async Task DoClickByCoordinateAsync(RecordedAction node)
+        private async Task<bool> DoClickByCoordinateAsync(RecordedAction node)
         {
             if (node.X <= 0 && node.Y <= 0)
             {
                 OnLog($"坐标模式点击失败: 无有效坐标");
-                return;
+                return false;
             }
 
             if (!string.IsNullOrEmpty(node.WindowTitle))
@@ -259,7 +401,7 @@ namespace WeChatAutomation.Core.Recording
                 IntPtr hwnd = FindTargetWindow(node.WindowTitle);
                 if (hwnd != IntPtr.Zero)
                 {
-                    User32.SetForegroundWindow(hwnd);
+                    EnsureWindowForeground(hwnd);
                     await Task.Delay(100);
                 }
             }
@@ -268,15 +410,16 @@ namespace WeChatAutomation.Core.Recording
             int clickY = (int)node.Y;
             OnLog($"坐标点击 ({clickX},{clickY})");
             await _simulator.ClickAsync(clickX, clickY);
+            return true;
         }
 
-        private async Task DoClickByUIAPathAsync(RecordedAction node)
+        private async Task<bool> DoClickByUIAPathAsync(RecordedAction node)
         {
             var (found, hwnd, rect) = TryLocateElement(node);
 
             if (found && !rect.IsEmpty && rect.Width > 0 && rect.Height > 0)
             {
-                User32.SetForegroundWindow(hwnd);
+                EnsureWindowForeground(hwnd);
                 await Task.Delay(100);
 
                 int clickX, clickY;
@@ -296,31 +439,32 @@ namespace WeChatAutomation.Core.Recording
                 }
 
                 await _simulator.ClickAsync(clickX, clickY);
-                return;
+                return true;
             }
 
             // 路径模式下禁止回退到坐标点击——直接报告失败
             OnLog($"UIA路径定位失败: {node.ElementName ?? node.ClassName ?? node.AutomationId ?? "未知"}" +
                   (!string.IsNullOrEmpty(node.XPath) ? $" (XPath={Trunc(node.XPath, 40)})" : ""));
+            return false;
         }
 
-        private async Task DoClickByVisionAsync(RecordedAction node)
+        private async Task<bool> DoClickByVisionAsync(RecordedAction node)
         {
             // 按脚本绑定的模型加载（_currentVisionModel），失败则中止该步
             if (!EnsureVisionModel(_currentVisionModel))
             {
                 OnLog("视觉模式失败: 模型未就绪");
-                return;
+                return false;
             }
 
             IntPtr hwnd = FindTargetWindow(node.WindowTitle);
             if (hwnd == IntPtr.Zero)
             {
                 OnLog($"视觉模式失败: 未找到窗口 \"{node.WindowTitle}\"");
-                return;
+                return false;
             }
 
-            User32.SetForegroundWindow(hwnd);
+            EnsureWindowForeground(hwnd);
             await Task.Delay(200);
 
             var (winX, winY, winW, winH) = WindowCapturer.GetWindowRect(hwnd);
@@ -328,7 +472,7 @@ namespace WeChatAutomation.Core.Recording
             if (screenshot == null)
             {
                 OnLog("视觉模式失败: 窗口截图失败");
-                return;
+                return false;
             }
 
             string label = node.VisionLabel ?? "button";
@@ -373,8 +517,31 @@ namespace WeChatAutomation.Core.Recording
             if (detection == null)
             {
                 OnLog($"视觉模式失败: 未检测到 \"{label}\" (置信度阈值: {confThreshold})");
-                return;
+                return false;
             }
+
+            // 捕获视觉检测结果，供回传到服务器
+            try
+            {
+                var allDetections = _visionDetector.Detect(screenshot, new[] { label }, confThreshold);
+                _visionResults.Add(new VisionDetectionResult
+                {
+                    WindowTitle = node.WindowTitle ?? "",
+                    VisionLabel = label,
+                    CapturedAt = DateTime.Now,
+                    Source = "VisionClick",
+                    Detections = allDetections.Select(d => new DetectionInfo
+                    {
+                        Label = d.Label,
+                        Confidence = d.Confidence,
+                        X = d.X,
+                        Y = d.Y,
+                        Width = d.Width,
+                        Height = d.Height
+                    }).ToList()
+                });
+            }
+            catch { /* 捕获结果不影响主流程 */ }
 
             int screenX = detection.CenterX + winX;
             int screenY = detection.CenterY + winY;
@@ -382,6 +549,7 @@ namespace WeChatAutomation.Core.Recording
             OnLog($"视觉点击: {detection.Label} ({detection.Confidence:P0}) @ 屏幕({screenX},{screenY}) 框({detection.X},{detection.Y} {detection.Width}x{detection.Height})" +
                   (hasRef ? $" (按录制坐标择近)" : ""));
             await _simulator.ClickAsync(screenX, screenY);
+            return true;
         }
 
         /// <summary>
@@ -850,7 +1018,8 @@ namespace WeChatAutomation.Core.Recording
             // 保持回调委托引用，防止 GC 回收
             User32.EnumWindowsProc callback = (hwnd, _) =>
             {
-                if (!User32.IsWindowVisible(hwnd)) return true;
+                // 不依赖 IsWindowVisible：微信等 Electron 应用窗口无 WS_VISIBLE 位但实际可见
+                if (!IsWindowActuallyVisible(hwnd)) return true;
                 int len = User32.GetWindowTextLength(hwnd);
                 if (len == 0) return true;
                 var sb = new System.Text.StringBuilder(len + 1);
@@ -865,6 +1034,14 @@ namespace WeChatAutomation.Core.Recording
             };
             User32.EnumWindows(callback, IntPtr.Zero);
 
+            // 如果标题匹配失败，尝试 FindWindow 精确匹配（对微信"微信"标题有效）
+            if (found == IntPtr.Zero)
+            {
+                IntPtr fw = User32.FindWindow(null, windowTitle);
+                if (fw != IntPtr.Zero && IsWindowActuallyVisible(fw))
+                    found = fw;
+            }
+
             // 如果精确匹配失败，尝试匹配进程名
             if (found == IntPtr.Zero)
             {
@@ -876,29 +1053,90 @@ namespace WeChatAutomation.Core.Recording
         }
 
         /// <summary>
-        /// 通过进程名查找窗口
+        /// 通过进程名查找窗口。
+        /// 同一进程可能有多个顶层窗口（如微信），优先选面积最大的主窗口。
         /// </summary>
         private IntPtr FindWindowByProcessName(string name)
         {
-            IntPtr found = IntPtr.Zero;
+            var all = FindAllWindowsByProcessName(name);
+            if (all.Count == 0) return IntPtr.Zero;
+
+            // 选面积最大的作为主窗口
+            IntPtr best = IntPtr.Zero;
+            long bestArea = 0;
+            foreach (var (hwnd, _, area) in all)
+            {
+                if (area > bestArea)
+                {
+                    bestArea = area;
+                    best = hwnd;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>
+        /// 通过进程名查找所有实际可见的顶层窗口（排除辅助窗口）。
+        /// 返回 (窗口句柄, 标题, 面积) 列表。用于"打开全部"同名进程窗口。
+        /// </summary>
+        private List<(IntPtr hwnd, string title, long area)> FindAllWindowsByProcessName(string name)
+        {
+            var result = new List<(IntPtr hwnd, string title, long area)>();
+            var seen = new HashSet<IntPtr>();
+
             User32.EnumWindowsProc callback = (hwnd, _) =>
             {
-                if (!User32.IsWindowVisible(hwnd)) return true;
+                // 不用 IsWindowVisible：微信等 Electron 应用窗口无 WS_VISIBLE 位但实际可见
+                if (!IsWindowActuallyVisible(hwnd)) return true;
+                if (!seen.Add(hwnd)) return true; // 去重
                 User32.GetWindowThreadProcessId(hwnd, out int pid);
                 try
                 {
                     var proc = System.Diagnostics.Process.GetProcessById(pid);
                     if (proc.ProcessName.Contains(name, StringComparison.OrdinalIgnoreCase))
                     {
-                        found = hwnd;
-                        return false;
+                        int len = User32.GetWindowTextLength(hwnd);
+                        if (len == 0) return true;
+                        var sb = new System.Text.StringBuilder(len + 1);
+                        User32.GetWindowText(hwnd, sb, sb.Capacity);
+                        string title = sb.ToString();
+
+                        // 排除辅助窗口（托盘消息、IME、默认 IME 等）
+                        if (title.IndexOf("MessageWindow", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            title.IndexOf("IME", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            title.Equals("Default IME", StringComparison.OrdinalIgnoreCase) ||
+                            title.IndexOf("Tray", StringComparison.OrdinalIgnoreCase) >= 0)
+                            return true;
+
+                        User32.GetWindowRect(hwnd, out var r);
+                        int width = r.Right - r.Left;
+                        int height = r.Bottom - r.Top;
+                        if (width <= 0 || height <= 0) return true;
+                        long area = (long)width * height;
+                        result.Add((hwnd, title, area));
                     }
                 }
                 catch { }
                 return true;
             };
             User32.EnumWindows(callback, IntPtr.Zero);
-            return found;
+            return result;
+        }
+
+        /// <summary>
+        /// 判断窗口是否"实际可见"。
+        /// 不依赖 IsWindowVisible（WS_VISIBLE 位）：微信等 Electron 应用的窗口
+        /// 实际显示在屏幕上但没有 WS_VISIBLE 样式位。这里用：有标题 + 矩形宽高>0 判断。
+        /// </summary>
+        private bool IsWindowActuallyVisible(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return false;
+            // 必须有标题（过滤 IME、消息窗口等辅助窗口）
+            if (User32.GetWindowTextLength(hwnd) == 0) return false;
+            // 矩形宽高必须 > 0
+            if (!User32.GetWindowRect(hwnd, out var r)) return false;
+            if (r.Right - r.Left <= 0 || r.Bottom - r.Top <= 0) return false;
+            return true;
         }
 
         private async Task DoTypeTextAsync(string text)
@@ -990,10 +1228,11 @@ namespace WeChatAutomation.Core.Recording
         }
 
         /// <summary>
-        /// 读取指定窗口的 UIA 文本内容
+        /// 读取指定窗口的 UIA 文本内容。若设置了 OutputParamName，内容会存入变量供后续判断引用。
         /// </summary>
-        private void DoReadContent(string windowTitle = null)
+        private void DoReadContent(RecordedAction node)
         {
+            string windowTitle = node.WindowTitle;
             try
             {
                 AutomationElement readElement = null;
@@ -1041,16 +1280,26 @@ namespace WeChatAutomation.Core.Recording
                     WindowTitle = title,
                     Content = content,
                     CapturedAt = DateTime.Now,
-                    Source = "ReadContent"
+                    Source = "ReadContent",
+                    OutputParamName = node.OutputParamName
                 };
                 _readResults.Add(result);
 
-                OnLog($"已读取窗口: {title} ({content.Length} 字符)");
+                // 如果设置了输出变量名，把读取到的内容存入变量，供后续 If 判断引用
+                if (!string.IsNullOrEmpty(node.OutputParamName))
+                {
+                    SetVariable(node.OutputParamName, content);
+                    OnLog($"已读取窗口: {title} ({content.Length} 字符) -> 变量 {{{node.OutputParamName}}}");
+                }
+                else
+                {
+                    OnLog($"已读取窗口: {title} ({content.Length} 字符)");
+                }
             }
             catch (Exception ex) { OnLog($"读取失败: {ex.Message}"); }
         }
 
-        private async Task DoScrollReadAsync(int scrollLines, string windowTitle = null)
+        private async Task DoScrollReadAsync(int scrollLines, string windowTitle = null, string outputParamName = null)
         {
             try
             {
@@ -1088,7 +1337,7 @@ namespace WeChatAutomation.Core.Recording
                     title = sb.ToString();
                 }
 
-                User32.SetForegroundWindow(hwnd);
+                EnsureWindowForeground(hwnd);
                 await Task.Delay(200);
 
                 var scrollInput = new User32.INPUT
@@ -1135,11 +1384,20 @@ namespace WeChatAutomation.Core.Recording
                     WindowTitle = title,
                     Content = content,
                     CapturedAt = DateTime.Now,
-                    Source = "ScrollRead"
+                    Source = "ScrollRead",
+                    OutputParamName = outputParamName
                 };
                 _readResults.Add(result);
 
-                OnLog($"滚动阅读: {title} ({content.Length} 字符)");
+                if (!string.IsNullOrEmpty(outputParamName))
+                {
+                    SetVariable(outputParamName, content);
+                    OnLog($"滚动阅读: {title} ({content.Length} 字符) -> 变量 {{{outputParamName}}}");
+                }
+                else
+                {
+                    OnLog($"滚动阅读: {title} ({content.Length} 字符)");
+                }
             }
             catch (Exception ex) { OnLog($"滚动阅读失败: {ex.Message}"); }
         }
@@ -1355,7 +1613,8 @@ namespace WeChatAutomation.Core.Recording
                         Content = content,
                         CapturedAt = DateTime.Now,
                         Source = "RegexMatch",
-                        MatchedValue = ""
+                        MatchedValue = "",
+                        OutputParamName = node.OutputParamName
                     };
                     _readResults.Add(emptyResult);
                     return;
@@ -1411,7 +1670,8 @@ namespace WeChatAutomation.Core.Recording
                     CapturedAt = DateTime.Now,
                     Source = "RegexMatch",
                     MatchedValue = matchedValue,
-                    Matches = matchItems
+                    Matches = matchItems,
+                    OutputParamName = node.OutputParamName
                 };
                 _readResults.Add(result);
 
@@ -1453,6 +1713,271 @@ namespace WeChatAutomation.Core.Recording
         }
 
         public void ClearVariables() => _variables.Clear();
+
+        /// <summary>
+        /// 记录点击步骤的成功/失败结果到变量，供后续 If 判断引用。
+        /// 始终写入固定变量 last_click_success；若点击步骤设置了 OutputParamName，也写入该变量。
+        /// </summary>
+        private void RecordClickResult(RecordedAction node, bool success)
+        {
+            string val = success ? "true" : "false";
+            SetVariable("last_click_success", val);
+            if (!string.IsNullOrEmpty(node.OutputParamName))
+                SetVariable(node.OutputParamName, val);
+        }
+
+        /// <summary>
+        /// 确保窗口在前台，如果最小化则先恢复。
+        /// 使用 ALT 键欺骗 + AttachThreadInput + ShowWindow 组合绕过 Windows 前台锁定限制。
+        /// 注意：若目标应用以管理员权限运行而本工具非管理员，受 UIPI 限制无法切换。
+        /// </summary>
+        private void EnsureWindowForeground(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+
+            // 取真正的顶层 owner 窗口（EnumWindows 可能返回子窗口/工具窗口）
+            IntPtr root = User32.GetAncestor(hwnd, User32.GA_ROOTOWNER);
+            if (root == IntPtr.Zero) root = User32.GetAncestor(hwnd, User32.GA_ROOT);
+            if (root != IntPtr.Zero) hwnd = root;
+
+            // 最小化则先恢复（SW_RESTORE=9）
+            if (User32.IsIconic(hwnd))
+            {
+                User32.ShowWindow(hwnd, 9);
+                OnLog("窗口从最小化恢复");
+            }
+
+            // 已经是前台窗口则无需操作
+            if (User32.GetForegroundWindow() == hwnd) return;
+
+            try
+            {
+                uint curThread = User32.GetCurrentThreadId();
+
+                // 尝试最多 3 次，每次用不同的手段，直到目标窗口成为前台
+                for (int attempt = 0; attempt < 3; attempt++)
+                {
+                    IntPtr foreHwnd = User32.GetForegroundWindow();
+                    // 注意：GetWindowThreadProcessId 必须带 out 参数，否则 native 会往空指针写 PID 导致崩溃
+                    uint foreThread = 0;
+                    if (foreHwnd != IntPtr.Zero)
+                    {
+                        int forePid;
+                        foreThread = (uint)User32.GetWindowThreadProcessId(foreHwnd, out forePid);
+                    }
+
+                    // AttachThreadInput 绑定当前前台线程输入到本线程
+                    bool attached = false;
+                    if (foreThread != 0 && foreThread != curThread)
+                    {
+                        attached = User32.AttachThreadInput(curThread, foreThread, true);
+                    }
+
+                    // ALT 键欺骗：按下并释放 ALT，解除前台锁定
+                    User32.keybd_event(User32.VK_MENU, 0, 0, 0);
+                    User32.keybd_event(User32.VK_MENU, 0, 0x0002, 0);
+
+                    // 组合调用：ShowWindow 激活 + BringWindowToTop 置顶 + SetForegroundWindow 设前台
+                    User32.ShowWindow(hwnd, 5);  // SW_SHOW
+                    User32.ShowWindow(hwnd, 9);  // SW_RESTORE
+                    User32.BringWindowToTop(hwnd);
+                    bool ok = User32.SetForegroundWindow(hwnd);
+
+                    if (attached)
+                        User32.AttachThreadInput(curThread, foreThread, false);
+
+                    // 短暂等待窗口响应
+                    System.Threading.Thread.Sleep(80);
+
+                    // 验证是否成功切到前台
+                    if (User32.GetForegroundWindow() == hwnd)
+                        return;
+
+                    if (!ok && attempt == 0)
+                        OnLog($"SetForegroundWindow 返回 false (尝试 {attempt + 1}/3)，可能被前台锁定");
+                }
+
+                // 最后手段：强制置顶（不抢占前台但提到 Z 序顶部）
+                OnLog("常规前置失败，尝试强制置顶");
+                User32.BringWindowToTop(hwnd);
+            }
+            catch (Exception ex)
+            {
+                OnLog($"切窗前置异常: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 切换窗口到前台。
+        /// SwitchAll=false（默认）：仅切换匹配的主窗口到前台。
+        /// SwitchAll=true：把该进程名的所有窗口都恢复显示并置顶，最后让主窗口成为前台。
+        /// </summary>
+        private void DoSwitchToWindow(RecordedAction node)
+        {
+            string title = node.WindowTitle ?? node.Parameter;
+            if (string.IsNullOrEmpty(title))
+            {
+                OnLog("切窗: 未指定窗口标题");
+                return;
+            }
+
+            // SwitchAll=true：打开该进程名的全部窗口
+            if (node.SwitchAll)
+            {
+                SwitchAllWindows(title);
+                return;
+            }
+
+            // SwitchAll=false：仅切换单个窗口
+            SwitchSingleWindow(title);
+        }
+
+        /// <summary>
+        /// 仅切换单个匹配窗口到前台（优先标题匹配，回退进程名主窗口）
+        /// </summary>
+        private void SwitchSingleWindow(string title)
+        {
+            IntPtr hwnd = FindTargetWindow(title);
+            if (hwnd == IntPtr.Zero)
+            {
+                OnLog($"切窗失败: 未找到窗口 \"{title}\"（按标题和进程名均未匹配）");
+                return;
+            }
+
+            int len = User32.GetWindowTextLength(hwnd);
+            string foundTitle = "";
+            if (len > 0)
+            {
+                var sb = new System.Text.StringBuilder(len + 1);
+                User32.GetWindowText(hwnd, sb, sb.Capacity);
+                foundTitle = sb.ToString();
+            }
+            User32.GetWindowThreadProcessId(hwnd, out int pid);
+            string procName = "";
+            try { procName = System.Diagnostics.Process.GetProcessById(pid).ProcessName; } catch { }
+
+            EnsureWindowForeground(hwnd);
+
+            bool success = User32.GetForegroundWindow() == hwnd;
+            if (success)
+                OnLog($"已切换到窗口: {foundTitle} (进程: {procName}, PID: {pid})");
+            else
+                OnLog($"切窗未完全生效: 目标=\"{foundTitle}\" (进程: {procName})，可能目标应用以管理员权限运行（UIPI 限制）或窗口拒绝激活");
+        }
+
+        /// <summary>
+        /// 打开该进程名的所有窗口：全部恢复显示并置顶，最后主窗口置前
+        /// </summary>
+        private void SwitchAllWindows(string title)
+        {
+            var allWindows = FindAllWindowsByProcessName(title);
+            if (allWindows.Count == 0)
+            {
+                // 没有按进程名匹配到，回退到单个窗口切换（可能是按标题输入的）
+                OnLog($"按进程名 \"{title}\" 未找到窗口，尝试按标题切换单个窗口");
+                SwitchSingleWindow(title);
+                return;
+            }
+
+            OnLog($"按进程名 \"{title}\" 找到 {allWindows.Count} 个窗口，全部恢复显示并置顶");
+
+            // 按面积从小到大排序：先恢复小窗口，最后把最大的主窗口设为前台
+            allWindows.Sort((a, b) => a.area.CompareTo(b.area));
+            IntPtr mainWindow = allWindows[^1].hwnd; // 最大的作为主窗口
+
+            foreach (var (wh, wtitle, _) in allWindows)
+            {
+                try
+                {
+                    // 最小化的先恢复
+                    if (User32.IsIconic(wh))
+                        User32.ShowWindow(wh, 9); // SW_RESTORE
+                    // 显示并置顶
+                    User32.ShowWindow(wh, 5); // SW_SHOW
+                    User32.BringWindowToTop(wh);
+                }
+                catch { }
+            }
+
+            // 最后把主窗口设为前台焦点
+            EnsureWindowForeground(mainWindow);
+
+            // 日志汇总
+            foreach (var (wh, wtitle, area) in allWindows)
+            {
+                User32.GetWindowThreadProcessId(wh, out int pid);
+                string pn = "";
+                try { pn = System.Diagnostics.Process.GetProcessById(pid).ProcessName; } catch { }
+                OnLog($"  已恢复窗口: \"{wtitle}\" (进程: {pn}, PID: {pid}, {area / 1000}k px²)");
+            }
+
+            bool ok = User32.GetForegroundWindow() == mainWindow;
+            OnLog(ok ? "全部窗口已打开，主窗口已置前" : "全部窗口已恢复显示，但主窗口未能抢占前台（可能受 UIPI 限制）");
+        }
+
+        /// <summary>
+        /// 条件表达式求值器。
+        /// 支持: ==, !=, >, <, >=, <=, contains, matches
+        /// 变量引用 {varName} 已在 ResolveVariables 中解析
+        /// </summary>
+        private bool EvaluateCondition(string? expression)
+        {
+            if (string.IsNullOrWhiteSpace(expression)) return false;
+
+            string expr = expression.Trim();
+
+            // 解析 {varName} 变量引用
+            foreach (var kvp in _variables)
+                expr = expr.Replace($"{{{kvp.Key}}}", kvp.Value);
+
+            // contains 运算符: A contains B
+            var containsMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s+contains\s+(.+)$");
+            if (containsMatch.Success)
+                return containsMatch.Groups[1].Value.Trim().Contains(containsMatch.Groups[2].Value.Trim());
+
+            // matches 运算符: A matches B (正则)
+            var matchesMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s+matches\s+(.+)$");
+            if (matchesMatch.Success)
+            {
+                try { return System.Text.RegularExpressions.Regex.IsMatch(matchesMatch.Groups[1].Value.Trim(), matchesMatch.Groups[2].Value.Trim()); }
+                catch { return false; }
+            }
+
+            // 数值比较: >=, <=, >, <
+            var numCmpMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s*(>=|<=|>|<)\s*(.+)$");
+            if (numCmpMatch.Success
+                && double.TryParse(numCmpMatch.Groups[1].Value.Trim(), out double left)
+                && double.TryParse(numCmpMatch.Groups[3].Value.Trim(), out double right))
+            {
+                return numCmpMatch.Groups[2].Value switch
+                {
+                    ">=" => left >= right,
+                    "<=" => left <= right,
+                    ">" => left > right,
+                    "<" => left < right,
+                    _ => false
+                };
+            }
+
+            // 字符串比较: ==, !=
+            var strCmpMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s*(==|!=)\s*(.+)$");
+            if (strCmpMatch.Success)
+            {
+                string lhs = strCmpMatch.Groups[1].Value.Trim();
+                string rhs = strCmpMatch.Groups[3].Value.Trim();
+                // 去除引号
+                if ((lhs.StartsWith('"') && lhs.EndsWith('"')) || (lhs.StartsWith('\'') && lhs.EndsWith('\'')))
+                    lhs = lhs[1..^1];
+                if ((rhs.StartsWith('"') && rhs.EndsWith('"')) || (rhs.StartsWith('\'') && rhs.EndsWith('\'')))
+                    rhs = rhs[1..^1];
+                return strCmpMatch.Groups[2].Value == "==" ? lhs == rhs : lhs != rhs;
+            }
+
+            // Truthy 检查: 非空、非 "0"、非 "false" 视为 true
+            return !string.IsNullOrWhiteSpace(expr)
+                && !expr.Equals("0", StringComparison.OrdinalIgnoreCase)
+                && !expr.Equals("false", StringComparison.OrdinalIgnoreCase);
+        }
 
         private void DoScroll(int lines)
         {
@@ -1516,6 +2041,11 @@ namespace WeChatAutomation.Core.Recording
                 RegexPattern = ResolveStr(node.RegexPattern),
                 RegexGroup = node.RegexGroup,
                 OutputParamName = node.OutputParamName,
+                ConditionExpression = ResolveStr(node.ConditionExpression),
+                GotoNodeId = node.GotoNodeId,           // NodeId 不做变量替换
+                TrueGotoNodeId = node.TrueGotoNodeId,
+                TargetScript = ResolveStr(node.TargetScript),
+                SwitchAll = node.SwitchAll,
                 IsEnabled = node.IsEnabled,
                 CreatedAt = node.CreatedAt,
                 XPath = ResolveStr(node.XPath),

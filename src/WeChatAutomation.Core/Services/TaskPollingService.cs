@@ -328,16 +328,45 @@ namespace WeChatAutomation.Core.Services
 
                 // 构建结果数据
                 object resultData = null;
-                if (result.ReadResults?.Count > 0)
+                if (result.ReadResults?.Count > 0 || result.VisionResults?.Count > 0)
                 {
-                    resultData = result.ReadResults.Select(r => new
+                    // 从阅读结果中提取 OutputParamName -> 内容映射，格式: {items:[{参数名: 阅读内容}]}
+                    var items = result.ReadResults?
+                        .Where(r => !string.IsNullOrEmpty(r.OutputParamName))
+                        .Select(r => new Dictionary<string, string>
+                        {
+                            { r.OutputParamName, r.Source == "RegexMatch" ? (r.MatchedValue ?? "") : r.Content }
+                        })
+                        .ToList();
+
+                    resultData = new
                     {
-                        r.WindowTitle,
-                        r.Content,
-                        r.Source,
-                        Matches = r.Matches?.Select(m => new { m.Value, m.Index, m.Groups }).ToList(),
-                        r.MatchedValue
-                    }).ToList();
+                        readResults = result.ReadResults?.Select(r => new
+                        {
+                            r.WindowTitle,
+                            r.Content,
+                            r.Source,
+                            Matches = r.Matches?.Select(m => new { m.Value, m.Index, m.Groups }).ToList(),
+                            r.MatchedValue,
+                            r.OutputParamName
+                        }).ToList(),
+                        visionResults = result.VisionResults?.Select(v => new
+                        {
+                            v.WindowTitle,
+                            v.VisionLabel,
+                            v.Source,
+                            Detections = v.Detections?.Select(d => new
+                            {
+                                d.Label,
+                                d.Confidence,
+                                d.X,
+                                d.Y,
+                                d.Width,
+                                d.Height
+                            }).ToList()
+                        }).ToList(),
+                        items
+                    };
                 }
 
                 _logger.Info("TaskPolling", $"任务完成: {task.TaskId} ({(result.Success ? "成功" : "失败")}, {sw.Elapsed.TotalSeconds:F1}s)");

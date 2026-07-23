@@ -21,7 +21,10 @@ namespace WeChatAutomation.Core.Recording
         ReadContent,
         ScrollRead,
         InputParam,
-        RegexMatch
+        RegexMatch,
+        If,
+        Goto,
+        SwitchToWindow
     }
 
     [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -74,6 +77,19 @@ namespace WeChatAutomation.Core.Recording
         public string? RegexGroup { get; set; }
         public string? OutputParamName { get; set; }
 
+        // 分支/控制流
+        public string? ConditionExpression { get; set; }   // 条件表达式，如 "{found} == true"、"{count} > 0"
+        public string? TrueGotoNodeId { get; set; }         // If 为 true 时跳转的目标 NodeId
+        public string? GotoNodeId { get; set; }             // Goto 的目标 / If 为 false 时跳转的目标 NodeId
+        /// <summary>
+        /// If 步骤条件成立时执行的子脚本名（执行完停止当前脚本，不执行后续步骤）。
+        /// 设置后 If 的行为变为：成立->执行该脚本并停止；不成立->停止当前脚本。
+        /// </summary>
+        public string? TargetScript { get; set; }
+
+        // 切窗选项：true=打开该进程名的所有窗口（全部恢复显示并置顶），false=仅切换主窗口
+        public bool SwitchAll { get; set; }
+
         // 元数据
         public bool IsEnabled { get; set; } = true;
         public DateTime CreatedAt { get; set; } = DateTime.Now;
@@ -97,10 +113,13 @@ namespace WeChatAutomation.Core.Recording
             ActionType.OpenApp => $"打开 {Trunc(Parameter, 30)}",
             ActionType.WaitForApp => $"等待应用 {Trunc(Parameter, 20)} ({DelayMs}ms超时)",
             ActionType.Scroll => $"滚动 {ScrollAmount} 行",
-            ActionType.ReadContent => "阅读窗口内容",
-            ActionType.ScrollRead => $"滚动阅读 {ScrollAmount} 行",
+            ActionType.ReadContent => "阅读窗口内容" + (!string.IsNullOrEmpty(OutputParamName) ? $" ->{{{OutputParamName}}}" : ""),
+            ActionType.ScrollRead => $"滚动阅读 {ScrollAmount} 行" + (!string.IsNullOrEmpty(OutputParamName) ? $" ->{{{OutputParamName}}}" : ""),
             ActionType.InputParam => $"输入参数 [{ParameterName ?? "未命名"}]{(CopyToClipboard ? " →剪切板" : "")}",
             ActionType.RegexMatch => $"正则识别 {Trunc(RegexPattern ?? "", 20)}{(CopyToClipboard ? " →剪切板" : "")}{(!string.IsNullOrEmpty(OutputParamName) ? $" →{{{OutputParamName}}}" : "")}",
+            ActionType.If => "判断 " + (!string.IsNullOrEmpty(ConditionExpression) ? Trunc(ConditionExpression, 20) : (!string.IsNullOrEmpty(OutputParamName) ? $"{{{OutputParamName}}} 有值" : "(未配置)")) + (!string.IsNullOrEmpty(TargetScript) ? $" ->脚本:{TargetScript}" : ""),
+            ActionType.Goto => $"跳转 → {GotoNodeId}",
+            ActionType.SwitchToWindow => $"切窗 {WindowTitle ?? Parameter}{(SwitchAll ? " (全部)" : "")}",
             _ => ActionType.ToString()
         };
 
@@ -172,6 +191,12 @@ namespace WeChatAutomation.Core.Recording
         public string Source { get; set; } = "";
         public List<RegexMatchItem> Matches { get; set; } = new();
         public string MatchedValue { get; set; } = "";
+
+        /// <summary>
+        /// 输出参数名（ReadContent/ScrollRead/RegexMatch 步骤设置的 OutputParamName）。
+        /// 有值时，该阅读内容可通过变量名供后续步骤引用，也用于向服务器报告结构化结果。
+        /// </summary>
+        public string? OutputParamName { get; set; }
     }
 
     public class RegexMatchItem
@@ -179,5 +204,30 @@ namespace WeChatAutomation.Core.Recording
         public string Value { get; set; } = "";
         public int Index { get; set; }
         public Dictionary<string, string> Groups { get; set; } = new();
+    }
+
+    /// <summary>
+    /// 视觉检测结果（YOLO 检测到的 UI 元素）
+    /// </summary>
+    public class VisionDetectionResult
+    {
+        public string WindowTitle { get; set; } = "";
+        public string VisionLabel { get; set; } = "";
+        public List<DetectionInfo> Detections { get; set; } = new();
+        public DateTime CapturedAt { get; set; }
+        public string Source { get; set; } = "VisionClick";
+    }
+
+    /// <summary>
+    /// 单个视觉检测项
+    /// </summary>
+    public class DetectionInfo
+    {
+        public string Label { get; set; } = "";
+        public float Confidence { get; set; }
+        public int X { get; set; }
+        public int Y { get; set; }
+        public int Width { get; set; }
+        public int Height { get; set; }
     }
 }
