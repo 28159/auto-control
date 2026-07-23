@@ -378,10 +378,10 @@ namespace WeChatAutomation.App
             };
             textPanel.Children.Add(line1);
 
-            // Line 2: summary
+            // Line 2: 关键参数（按类型提取）
             var line2 = new TextBlock
             {
-                Text = Truncate(action.Summary, 20),
+                Text = Truncate(GetNodeDetail(action), 22),
                 FontSize = 10 * Math.Max(_zoom, 0.7),
                 Foreground = new SolidColorBrush(Color.FromRgb(51, 51, 51)),
                 TextTrimming = TextTrimming.CharacterEllipsis
@@ -431,43 +431,164 @@ namespace WeChatAutomation.App
             var action = _actions.Find(a => a.NodeId == _selectedNodeId);
             if (action == null)
             {
-                propsPanel.Children.Add(new TextBlock { Text = "Select a node to view properties", Foreground = Brushes.Gray, FontSize = 11, TextWrapping = TextWrapping.Wrap });
+                propsPanel.Children.Add(new TextBlock { Text = "选择一个节点查看属性", Foreground = Brushes.Gray, FontSize = 11, TextWrapping = TextWrapping.Wrap });
                 return;
             }
 
-            propsPanel.Children.Add(new TextBlock { Text = $"Step #{action.Order}", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 6) });
-            propsPanel.Children.Add(new TextBlock { Text = $"Type: {action.ActionType}", Margin = new Thickness(0, 0, 0, 3) });
-            propsPanel.Children.Add(new TextBlock { Text = $"Name: {action.Name}", Margin = new Thickness(0, 0, 0, 3), TextWrapping = TextWrapping.Wrap });
-            propsPanel.Children.Add(new TextBlock { Text = $"NodeId: {action.NodeId}", FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 6) });
+            // 标题
+            propsPanel.Children.Add(new TextBlock
+            {
+                Text = $"步骤 #{action.Order}  {action.ActionType}",
+                FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 3)
+            });
+            propsPanel.Children.Add(new TextBlock
+            {
+                Text = $"NodeId: {action.NodeId}",
+                FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 8)
+            });
 
-            if (!string.IsNullOrEmpty(action.Parameter))
-                propsPanel.Children.Add(new TextBlock { Text = $"Param: {Truncate(action.Parameter, 40)}", Margin = new Thickness(0, 0, 0, 3), TextWrapping = TextWrapping.Wrap });
-            if (!string.IsNullOrEmpty(action.WindowTitle))
-                propsPanel.Children.Add(new TextBlock { Text = $"Window: {action.WindowTitle}", Margin = new Thickness(0, 0, 0, 3) });
+            // 名称（可编辑）
+            propsPanel.Children.Add(MakeEditField("名称:", action.Name ?? "", v => { action.Name = v; }));
+            // 窗口标题（按类型显隐）
+            if (ShowWindowTitle(action.ActionType))
+                propsPanel.Children.Add(MakeEditField("窗口标题:", action.WindowTitle ?? "", v => { action.WindowTitle = v; }, "留空=当前前台窗口"));
+            // 参数（按类型显隐）
+            if (ShowParameter(action.ActionType))
+                propsPanel.Children.Add(MakeEditField("参数:", action.Parameter ?? "", v => { action.Parameter = v; }, multiline: true));
+            // 滚动行数
+            if (action.ActionType == ActionType.Scroll || action.ActionType == ActionType.ScrollRead)
+                propsPanel.Children.Add(MakeEditField("滚动行数:", action.ScrollAmount.ToString(), v => { if (int.TryParse(v, out int n)) action.ScrollAmount = n; }));
+            // 输出变量名
+            if (ShowOutputVar(action.ActionType))
+                propsPanel.Children.Add(MakeEditField("输出变量名:", action.OutputParamName ?? "", v => { action.OutputParamName = string.IsNullOrWhiteSpace(v) ? null : v; }, "阅读/正则存内容，点击存成功状态"));
+            // 延时
+            if (ShowDelay(action.ActionType))
+                propsPanel.Children.Add(MakeEditField("延时(ms):", action.DelayMs.ToString(), v => { if (int.TryParse(v, out int d)) action.DelayMs = d; }));
 
+            // 点击模式（仅点击）
+            if (action.ActionType == ActionType.Click)
+            {
+                var cmPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+                cmPanel.Children.Add(new TextBlock { Text = "点击模式:", Margin = new Thickness(0, 0, 0, 3), FontSize = 11 });
+                var cmCombo = new ComboBox { Width = 120 };
+                cmCombo.Items.Add("Coordinate"); cmCombo.Items.Add("UIAPath"); cmCombo.Items.Add("Vision");
+                cmCombo.SelectedItem = action.ClickMode.ToString();
+                cmCombo.SelectionChanged += (_, _) =>
+                {
+                    if (Enum.TryParse<WeChatAutomation.Core.Recording.ClickMode>(cmCombo.SelectedItem?.ToString(), out var cm))
+                    { action.ClickMode = cm; SyncToRecorder(); RenderFlowChart(); }
+                };
+                cmPanel.Children.Add(cmCombo);
+                propsPanel.Children.Add(cmPanel);
+            }
+
+            // If 分支配置
             if (action.ActionType == ActionType.If)
             {
                 propsPanel.Children.Add(new Separator { Margin = new Thickness(0, 6, 0, 6) });
-                propsPanel.Children.Add(new TextBlock { Text = "Branch config:", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 3) });
-                propsPanel.Children.Add(new TextBlock { Text = $"Condition: {action.ConditionExpression}", Margin = new Thickness(0, 0, 0, 3), TextWrapping = TextWrapping.Wrap });
-                propsPanel.Children.Add(new TextBlock { Text = $"True -> {(action.TrueGotoNodeId ?? "next step")}", Foreground = new SolidColorBrush(Color.FromRgb(76, 175, 80)), Margin = new Thickness(0, 0, 0, 3) });
-                propsPanel.Children.Add(new TextBlock { Text = $"False -> {(action.GotoNodeId ?? "next step")}", Foreground = new SolidColorBrush(Color.FromRgb(244, 67, 54)), Margin = new Thickness(0, 0, 0, 3) });
+                propsPanel.Children.Add(new TextBlock { Text = "分支配置:", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 3) });
+                propsPanel.Children.Add(MakeEditField("条件表达式:", action.ConditionExpression ?? "", v => { action.ConditionExpression = v; }, "留空则按输出变量是否有值判断"));
+                propsPanel.Children.Add(MakeEditField("成立时执行脚本:", action.TargetScript ?? "", v => { action.TargetScript = string.IsNullOrWhiteSpace(v) ? null : v; }, "条件成立时执行的子脚本名"));
+                propsPanel.Children.Add(MakeTargetCombo("True 跳转:", action.TrueGotoNodeId, _actions, true, v => { action.TrueGotoNodeId = v; }));
+                propsPanel.Children.Add(MakeTargetCombo("False 跳转:", action.GotoNodeId, _actions, true, v => { action.GotoNodeId = v; }));
             }
 
+            // Goto 目标
             if (action.ActionType == ActionType.Goto)
             {
                 propsPanel.Children.Add(new Separator { Margin = new Thickness(0, 6, 0, 6) });
-                propsPanel.Children.Add(new TextBlock { Text = $"Goto target: {action.GotoNodeId}", Margin = new Thickness(0, 0, 0, 3) });
+                propsPanel.Children.Add(MakeTargetCombo("跳转目标:", action.GotoNodeId, _actions, true, v => { action.GotoNodeId = v; }));
             }
 
+            // 备注（可编辑）
+            propsPanel.Children.Add(MakeEditField("备注:", action.Remark ?? "", v => { action.Remark = string.IsNullOrWhiteSpace(v) ? null : v; }, "步骤说明/备注"));
+
+            // 操作按钮
             propsPanel.Children.Add(new Separator { Margin = new Thickness(0, 10, 0, 6) });
-            var editBtn = new Button { Content = "Edit", Padding = new Thickness(10, 4, 10, 4), Margin = new Thickness(0, 0, 0, 3) };
-            editBtn.Click += (_, _) => EditSelectedStep();
-            propsPanel.Children.Add(editBtn);
-            var deleteBtn = new Button { Content = "Delete", Padding = new Thickness(10, 4, 10, 4), Foreground = Brushes.Red };
-            deleteBtn.Click += (_, _) => DeleteSelectedStep();
-            propsPanel.Children.Add(deleteBtn);
+            var btnRow1 = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 4) };
+            btnRow1.Children.Add(MakeBtn("✏ 编辑", null, EditSelectedStep));
+            btnRow1.Children.Add(MakeBtn("📋 复制", new Thickness(5, 0, 0, 0), DuplicateSelectedStep));
+            propsPanel.Children.Add(btnRow1);
+            var btnRow2 = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 4) };
+            btnRow2.Children.Add(MakeBtn("↑ 上移", null, MoveSelectedUp));
+            btnRow2.Children.Add(MakeBtn("↓ 下移", new Thickness(5, 0, 0, 0), MoveSelectedDown));
+            propsPanel.Children.Add(btnRow2);
+            propsPanel.Children.Add(MakeBtn("🗑 删除", null, DeleteSelectedStep, Brushes.Red));
         }
+
+        // 构建可编辑字段：失焦时写回并同步刷新
+        private StackPanel MakeEditField(string label, string value, Action<string> onCommit, string? tip = null, bool multiline = false)
+        {
+            var panel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            panel.Children.Add(new TextBlock { Text = label, Margin = new Thickness(0, 0, 0, 3), FontSize = 11 });
+            TextBox box;
+            if (multiline)
+                box = new TextBox { Text = value, TextWrapping = TextWrapping.Wrap, AcceptsReturn = true, MaxHeight = 70, ToolTip = tip };
+            else
+                box = new TextBox { Text = value, ToolTip = tip };
+            box.LostFocus += (_, _) =>
+            {
+                onCommit(box.Text);
+                SyncToRecorder();
+                RenderFlowChart();
+            };
+            panel.Children.Add(box);
+            return panel;
+        }
+
+        // 构建分支/跳转目标下拉：显示"#N 摘要"，第一项"(下一步)"
+        private StackPanel MakeTargetCombo(string label, string? currentId, List<RecordedAction> actions, bool allowNone, Action<string?> onCommit)
+        {
+            var panel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            panel.Children.Add(new TextBlock { Text = label, Margin = new Thickness(0, 0, 0, 3), FontSize = 11 });
+            var combo = new ComboBox();
+            int sel = 0;
+            if (allowNone) combo.Items.Add("(下一步)");
+            for (int i = 0; i < actions.Count; i++)
+            {
+                combo.Items.Add($"#{actions[i].Order} {Truncate(actions[i].Summary, 24)}");
+                if (actions[i].NodeId == currentId) sel = allowNone ? i + 1 : i;
+            }
+            combo.SelectedIndex = Math.Min(sel, combo.Items.Count - 1);
+            combo.SelectionChanged += (_, _) =>
+            {
+                int idx = combo.SelectedIndex;
+                string? targetId = null;
+                if (allowNone) { if (idx > 0) targetId = actions[idx - 1].NodeId; }
+                else { if (idx >= 0 && idx < actions.Count) targetId = actions[idx].NodeId; }
+                onCommit(targetId);
+                SyncToRecorder();
+                RenderFlowChart();
+            };
+            panel.Children.Add(combo);
+            return panel;
+        }
+
+        private static Button MakeBtn(string text, Thickness? margin, Action onClick, Brush? fore = null)
+        {
+            var b = new Button { Content = text, Padding = new Thickness(10, 4, 10, 4) };
+            if (margin.HasValue) b.Margin = margin.Value;
+            if (fore != null) b.Foreground = fore;
+            b.Click += (_, _) => onClick();
+            return b;
+        }
+
+        private static bool ShowWindowTitle(ActionType t) =>
+            t == ActionType.Click || t == ActionType.ReadContent || t == ActionType.ScrollRead
+            || t == ActionType.RegexMatch || t == ActionType.SwitchToWindow || t == ActionType.Screenshot;
+
+        private static bool ShowParameter(ActionType t) =>
+            t == ActionType.TypeText || t == ActionType.SendKeys || t == ActionType.Wait
+            || t == ActionType.InsertText || t == ActionType.OpenApp || t == ActionType.WaitForApp
+            || t == ActionType.SwitchToWindow;
+
+        private static bool ShowOutputVar(ActionType t) =>
+            t == ActionType.Click || t == ActionType.ReadContent || t == ActionType.ScrollRead || t == ActionType.RegexMatch;
+
+        private static bool ShowDelay(ActionType t) =>
+            t == ActionType.Click || t == ActionType.WaitForApp || t == ActionType.OpenApp
+            || t == ActionType.TypeText || t == ActionType.SendKeys || t == ActionType.InsertText
+            || t == ActionType.Scroll || t == ActionType.ScrollRead;
 
         // === Edit / Delete ===
 
@@ -583,7 +704,7 @@ namespace WeChatAutomation.App
             if (string.IsNullOrEmpty(_selectedNodeId)) return;
             var action = _actions.Find(a => a.NodeId == _selectedNodeId);
             if (action == null) return;
-            if (MessageBox.Show($"Delete step #{action.Order}?\n{action.Summary}", "Delete", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+            if (MessageBox.Show($"确定删除步骤 #{action.Order}？\n{action.Summary}", "删除", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
             _actions.Remove(action);
             // Clean up references to deleted node
             foreach (var a in _actions)
@@ -597,6 +718,66 @@ namespace WeChatAutomation.App
             SyncToRecorder();
             RenderFlowChart();
             UpdatePropertiesPanel();
+        }
+
+        /// <summary>复制选中步骤，插入到其后方（深拷贝，新 NodeId）。</summary>
+        private void DuplicateSelectedStep()
+        {
+            if (string.IsNullOrEmpty(_selectedNodeId)) return;
+            var action = _actions.Find(a => a.NodeId == _selectedNodeId);
+            if (action == null) return;
+            var copy = new RecordedAction
+            {
+                ActionType = action.ActionType,
+                Name = action.Name,
+                ClassName = action.ClassName, ElementName = action.ElementName, AutomationId = action.AutomationId,
+                ControlType = action.ControlType, WindowTitle = action.WindowTitle,
+                X = action.X, Y = action.Y, ClickMode = action.ClickMode,
+                VisionLabel = action.VisionLabel, VisionConfThreshold = action.VisionConfThreshold,
+                XPath = action.XPath, SiblingIndex = action.SiblingIndex, RuntimeId = action.RuntimeId,
+                Parameter = action.Parameter, DelayMs = action.DelayMs, ScrollAmount = action.ScrollAmount,
+                ParameterName = action.ParameterName, DefaultValue = action.DefaultValue, IsRequired = action.IsRequired,
+                CopyToClipboard = action.CopyToClipboard,
+                RegexPattern = action.RegexPattern, RegexGroup = action.RegexGroup, OutputParamName = action.OutputParamName,
+                ConditionExpression = action.ConditionExpression, GotoNodeId = action.GotoNodeId, TrueGotoNodeId = action.TrueGotoNodeId,
+                TargetScript = action.TargetScript, SwitchAll = action.SwitchAll, IsEnabled = action.IsEnabled,
+                Remark = action.Remark
+            };
+            int idx = _actions.IndexOf(action);
+            _actions.Insert(idx + 1, copy);
+            _selectedNodeId = copy.NodeId;
+            for (int i = 0; i < _actions.Count; i++) _actions[i].Order = i + 1;
+            SyncToRecorder();
+            RenderFlowChart();
+            UpdatePropertiesPanel();
+        }
+
+        private void MoveSelectedUp()
+        {
+            if (string.IsNullOrEmpty(_selectedNodeId)) return;
+            var action = _actions.Find(a => a.NodeId == _selectedNodeId);
+            if (action == null) return;
+            int idx = _actions.IndexOf(action);
+            if (idx <= 0) return;
+            _actions.RemoveAt(idx);
+            _actions.Insert(idx - 1, action);
+            for (int i = 0; i < _actions.Count; i++) _actions[i].Order = i + 1;
+            SyncToRecorder();
+            RenderFlowChart();
+        }
+
+        private void MoveSelectedDown()
+        {
+            if (string.IsNullOrEmpty(_selectedNodeId)) return;
+            var action = _actions.Find(a => a.NodeId == _selectedNodeId);
+            if (action == null) return;
+            int idx = _actions.IndexOf(action);
+            if (idx < 0 || idx >= _actions.Count - 1) return;
+            _actions.RemoveAt(idx);
+            _actions.Insert(idx + 1, action);
+            for (int i = 0; i < _actions.Count; i++) _actions[i].Order = i + 1;
+            SyncToRecorder();
+            RenderFlowChart();
         }
 
         private void SyncToRecorder()
@@ -617,23 +798,99 @@ namespace WeChatAutomation.App
         {
             var button = sender as Button;
             string? typeTag = button?.Tag as string;
-            var newNode = new RecordedAction { Order = _actions.Count + 1, ClickMode = _currentClickMode, ActionType = ActionType.Click, Name = "Click" };
+            if (string.IsNullOrEmpty(typeTag)) return;
 
-            if (typeTag == "Click") { newNode.ActionType = ActionType.Click; newNode.Name = "Click"; }
-            else if (typeTag == "TypeText") { newNode.ActionType = ActionType.TypeText; newNode.Name = "TypeText"; }
-            else if (typeTag == "Wait") { newNode.ActionType = ActionType.Wait; newNode.Parameter = "1000"; newNode.Name = "Wait 1000ms"; }
-            else if (typeTag == "Screenshot") { newNode.ActionType = ActionType.Screenshot; newNode.Name = "Screenshot"; }
-            else if (typeTag == "ReadContent") { newNode.ActionType = ActionType.ReadContent; newNode.Name = "ReadContent"; }
-            else if (typeTag == "RegexMatch") { newNode.ActionType = ActionType.RegexMatch; newNode.Name = "RegexMatch"; }
-            else if (typeTag == "SwitchToWindow") { newNode.ActionType = ActionType.SwitchToWindow; newNode.Name = "SwitchToWindow"; }
-            else if (typeTag == "If") { newNode.ActionType = ActionType.If; newNode.Name = "If"; newNode.ConditionExpression = ""; }
-            else if (typeTag == "Goto") { newNode.ActionType = ActionType.Goto; newNode.Name = "Goto"; if (_actions.Count > 0) newNode.GotoNodeId = _actions[0].NodeId; }
+            var newNode = new RecordedAction { Order = _actions.Count + 1, ClickMode = _currentClickMode, ActionType = ActionType.Click, Name = "点击" };
+
+            // 需要即填内容的类型：先弹输入框，取消则不添加
+            switch (typeTag)
+            {
+                case "Click": newNode.ActionType = ActionType.Click; newNode.Name = "点击"; break;
+                case "TypeText":
+                    {
+                        var t = ShowInput("输入文本", "内容:");
+                        if (t == null) return;
+                        newNode.ActionType = ActionType.TypeText; newNode.Parameter = t;
+                        newNode.Name = t.Length > 12 ? "输入\"" + t[..12] + "...\"" : "输入\"" + t + "\"";
+                        break;
+                    }
+                case "SendKeys":
+                    {
+                        var k = ShowInput("按键", "如 Enter, Ctrl+A:", "Enter");
+                        if (k == null) return;
+                        newNode.ActionType = ActionType.SendKeys; newNode.Parameter = k; newNode.Name = "按键 " + k;
+                        break;
+                    }
+                case "Copy": newNode.ActionType = ActionType.Copy; newNode.Name = "复制"; break;
+                case "Paste": newNode.ActionType = ActionType.Paste; newNode.Name = "粘贴"; break;
+                case "InsertText":
+                    {
+                        var t = ShowInput("插入文本", "内容:");
+                        if (t == null) return;
+                        newNode.ActionType = ActionType.InsertText; newNode.Parameter = t;
+                        newNode.Name = t.Length > 12 ? "插入\"" + t[..12] + "...\"" : "插入\"" + t + "\"";
+                        break;
+                    }
+                case "Wait":
+                    {
+                        var ms = ShowInput("等待", "毫秒:", "1000");
+                        if (!int.TryParse(ms, out int v)) return;
+                        newNode.ActionType = ActionType.Wait; newNode.Parameter = v.ToString(); newNode.Name = "等待" + v + "ms";
+                        break;
+                    }
+                case "Screenshot": newNode.ActionType = ActionType.Screenshot; newNode.Name = "截图"; break;
+                case "OpenApp": newNode.ActionType = ActionType.OpenApp; newNode.Name = "打开应用"; break;
+                case "WaitForApp": newNode.ActionType = ActionType.WaitForApp; newNode.Name = "等待应用"; break;
+                case "ReadContent": newNode.ActionType = ActionType.ReadContent; newNode.Name = "阅读窗口"; break;
+                case "ScrollRead":
+                    {
+                        var n = ShowInput("滚动阅读", "行数:", "5");
+                        if (!int.TryParse(n, out int v)) return;
+                        newNode.ActionType = ActionType.ScrollRead; newNode.ScrollAmount = v; newNode.Parameter = v.ToString(); newNode.Name = "滚动阅读" + v + "行";
+                        break;
+                    }
+                case "RegexMatch": newNode.ActionType = ActionType.RegexMatch; newNode.Name = "正则识别"; break;
+                case "Scroll":
+                    {
+                        var n = ShowInput("滚动", "行数(正=下 负=上):", "3");
+                        if (!int.TryParse(n, out int v)) return;
+                        newNode.ActionType = ActionType.Scroll; newNode.ScrollAmount = v; newNode.Parameter = v.ToString(); newNode.Name = "滚动" + v + "行";
+                        break;
+                    }
+                case "InputParam": newNode.ActionType = ActionType.InputParam; newNode.ParameterName = "参数1"; newNode.Name = "输入参数"; break;
+                case "If": newNode.ActionType = ActionType.If; newNode.Name = "判断"; newNode.ConditionExpression = ""; break;
+                case "Goto": newNode.ActionType = ActionType.Goto; newNode.Name = "跳转"; if (_actions.Count > 0) newNode.GotoNodeId = _actions[0].NodeId; break;
+                case "SwitchToWindow": newNode.ActionType = ActionType.SwitchToWindow; newNode.Name = "切窗"; break;
+                default: return;
+            }
 
             _actions.Add(newNode);
             _selectedNodeId = newNode.NodeId;
             SyncToRecorder();
             RenderFlowChart();
             UpdatePropertiesPanel();
+        }
+
+        /// <summary>轻量单字段输入框，返回输入文本；用户取消返回 null。</summary>
+        private string? ShowInput(string title, string prompt, string def = "")
+        {
+            var w = new Window
+            {
+                Title = title, Width = 320, SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this, ResizeMode = ResizeMode.NoResize
+            };
+            var sp = new StackPanel { Margin = new Thickness(15) };
+            sp.Children.Add(new TextBlock { Text = prompt, Margin = new Thickness(0, 0, 0, 5) });
+            var box = new TextBox { Text = def, Margin = new Thickness(0, 0, 0, 10) };
+            sp.Children.Add(box);
+            var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            var ok = new Button { Content = "确定", IsDefault = true, Padding = new Thickness(15, 4, 15, 4), FontWeight = FontWeights.Bold };
+            var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 4, 15, 4), Margin = new Thickness(8, 0, 0, 0) };
+            bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
+            w.Content = sp;
+            ok.Click += (_, _) => { if (string.IsNullOrWhiteSpace(box.Text) && def == "") { MessageBox.Show("内容不能为空"); return; } w.DialogResult = true; };
+            return w.ShowDialog() == true ? box.Text : null;
         }
 
         private void ZoomIn_Click(object sender, RoutedEventArgs e)
@@ -664,6 +921,19 @@ namespace WeChatAutomation.App
             RenderFlowChart();
         }
 
+        /// <summary>Ctrl+滚轮缩放画布；普通滚轮垂直滚动。</summary>
+        private void CanvasScroll_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                double delta = e.Delta > 0 ? 0.1 : -0.1;
+                _zoom = Math.Clamp(_zoom + delta, 0.3, 2.0);
+                RenderFlowChart();
+                e.Handled = true;
+            }
+            // 非 Ctrl 时让 ScrollViewer 正常垂直滚动
+        }
+
         // === Helpers ===
 
         private static string GetActionIcon(ActionType type) => type switch
@@ -688,6 +958,34 @@ namespace WeChatAutomation.App
             ActionType.SwitchToWindow => "W2",
             _ => "*"
         };
+
+        /// <summary>按类型提取节点关键参数用于显示。若有备注则优先显示备注。</summary>
+        private static string GetNodeDetail(RecordedAction a)
+        {
+            if (!string.IsNullOrEmpty(a.Remark)) return a.Remark;
+            return a.ActionType switch
+        {
+            ActionType.Click => a.ClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision
+                ? $"视觉:{a.VisionLabel ?? "button"}"
+                : a.ClickMode == WeChatAutomation.Core.Recording.ClickMode.UIAPath && !string.IsNullOrEmpty(a.XPath)
+                    ? $"路径:{a.ElementName ?? "未知"}"
+                    : a.X > 0 || a.Y > 0 ? $"@({a.X:F0},{a.Y:F0})" : "点击",
+            ActionType.TypeText or ActionType.InsertText => !string.IsNullOrEmpty(a.Parameter) ? $"\"{a.Parameter}\"" : a.Name,
+            ActionType.SendKeys => !string.IsNullOrEmpty(a.Parameter) ? a.Parameter : "按键",
+            ActionType.Wait => !string.IsNullOrEmpty(a.Parameter) ? $"{a.Parameter}ms" : "等待",
+            ActionType.Scroll => $"{a.ScrollAmount}行",
+            ActionType.ScrollRead => $"滚动{a.ScrollAmount}行{( !string.IsNullOrEmpty(a.OutputParamName) ? $" ->{{{a.OutputParamName}}}" : "")}",
+            ActionType.ReadContent => !string.IsNullOrEmpty(a.OutputParamName) ? $"->{a.OutputParamName}" : "阅读",
+            ActionType.RegexMatch => !string.IsNullOrEmpty(a.RegexPattern) ? a.RegexPattern : "正则",
+            ActionType.If => !string.IsNullOrEmpty(a.ConditionExpression) ? a.ConditionExpression
+                : !string.IsNullOrEmpty(a.OutputParamName) ? $"{{{a.OutputParamName}}}?" : "判断",
+            ActionType.Goto => !string.IsNullOrEmpty(a.GotoNodeId) ? $"→{a.GotoNodeId[..Math.Min(8, a.GotoNodeId.Length)]}" : "跳转",
+            ActionType.SwitchToWindow => !string.IsNullOrEmpty(a.WindowTitle) ? a.WindowTitle : !string.IsNullOrEmpty(a.Parameter) ? a.Parameter : "切窗",
+            ActionType.OpenApp => !string.IsNullOrEmpty(a.Parameter) ? a.Parameter : "打开",
+            ActionType.InputParam => !string.IsNullOrEmpty(a.ParameterName) ? $"[{a.ParameterName}]" : "参数",
+            _ => a.Name
+        };
+        }
 
         private static string Truncate(string s, int max) => string.IsNullOrEmpty(s) ? "" : s.Length > max ? s[..max] + "..." : s;
     }

@@ -159,20 +159,25 @@
                         </Grid.RowDefinitions>
 
                         <DataGrid Grid.Row="0" x:Name="StepsGrid" AutoGenerateColumns="False"
-                                  CanUserAddRows="False" IsReadOnly="True" SelectionMode="Extended"
+                                  CanUserAddRows="False" SelectionMode="Extended"
                                   GridLinesVisibility="Horizontal" AlternatingRowBackground="#FAFAFA"
                                   MouseDoubleClick="StepsGrid_MouseDoubleClick" HeadersVisibility="Column"
-                                  LoadingRow="StepsGrid_LoadingRow">
+                                  LoadingRow="StepsGrid_LoadingRow" AllowDrop="True"
+                                  ToolTip="双击名称/参数/正则/延时可直接编辑；双击其他列打开完整编辑；拖动行可调整顺序"
+                                  PreviewMouseLeftButtonDown="StepsGrid_PreviewMouseLeftButtonDown"
+                                  PreviewMouseMove="StepsGrid_PreviewMouseMove"
+                                  DragOver="StepsGrid_DragOver" Drop="StepsGrid_Drop">
                             <DataGrid.Columns>
                                 <DataGridCheckBoxColumn Header="启用" Width="40" Binding="{Binding IsEnabled, Mode=TwoWay}"/>
-                                <DataGridTextColumn Header="#" Binding="{Binding Order}" Width="35"/>
-                                <DataGridTextColumn Header="类型" Binding="{Binding ActionType}" Width="70"/>
-                                <DataGridTextColumn Header="模式" Binding="{Binding ClickMode}" Width="50"/>
-                                <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="*"/>
-                                <DataGridTextColumn Header="参数" Binding="{Binding Parameter}" Width="180"/>
-                                <DataGridTextColumn Header="正则" Binding="{Binding RegexPattern}" Width="100"/>
-                                <DataGridTextColumn Header="延时" Binding="{Binding DelayMs}" Width="55"/>
-                                <DataGridTemplateColumn Header="操作" Width="100">
+                                <DataGridTextColumn Header="#" Binding="{Binding Order}" Width="35" IsReadOnly="True"/>
+                                <DataGridTextColumn Header="类型" Binding="{Binding ActionType}" Width="70" IsReadOnly="True"/>
+                                <DataGridTextColumn Header="模式" Binding="{Binding ClickMode}" Width="50" IsReadOnly="True"/>
+                                <DataGridTextColumn Header="名称" Binding="{Binding Name, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="*"/>
+                                <DataGridTextColumn Header="参数" Binding="{Binding Parameter, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="180"/>
+                                <DataGridTextColumn Header="正则" Binding="{Binding RegexPattern, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="100"/>
+                                <DataGridTextColumn Header="延时" Binding="{Binding DelayMs, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="55"/>
+                                <DataGridTextColumn Header="备注" Binding="{Binding Remark, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="120"/>
+                                <DataGridTemplateColumn Header="操作" Width="100" IsReadOnly="True">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
                                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
@@ -195,24 +200,61 @@
                             <!-- 新增操作 -->
                             <WrapPanel Grid.Column="0">
                                 <TextBlock Text="新增:" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="11" Margin="0,0,4,0"/>
-                                <Button Content="👆点击" Click="AddClick_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="⌨输入" Click="AddText_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="🔤按键" Click="AddKeys_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="📋复制" Click="AddCopy_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="📄粘贴" Click="AddPaste_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="✏插入" Click="AddInsert_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="⏳等待" Click="AddWait_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="📸截图" Click="AddScreenshot_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="📂打开" Click="AddOpenApp_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="⏳等应用" Click="AddWaitForApp_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="📖阅读" Click="AddReadContent_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="📖滚读" Click="AddScrollRead_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="🔍正则" Click="AddRegexMatch_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="正则识别屏幕内容"/>
-                                <Button Content="🖱滚动" Click="AddScroll_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
-                                <Button Content="📝参数" Click="AddInputParam_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="添加动态输入参数"/>
-                                <Button Content="🔀判断" Click="AddIf_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="条件判断分支"/>
-                                <Button Content="↩跳转" Click="AddGoto_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="跳转到指定步骤"/>
-                                <Button Content="🪟切窗" Click="AddSwitchToWindow_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="切换窗口到前台"/>
+
+                                <Border Background="#F2F2F2" CornerRadius="3" Padding="4,1" Margin="0,0,4,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="点击" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                                        <Button Content="👆点击" Click="AddClick_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Background="#F2F2F2" CornerRadius="3" Padding="4,1" Margin="0,0,4,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="输入" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                                        <Button Content="⌨输入" Click="AddText_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                        <Button Content="🔤按键" Click="AddKeys_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                        <Button Content="📋复制" Click="AddCopy_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                        <Button Content="📄粘贴" Click="AddPaste_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                        <Button Content="✏插入" Click="AddInsert_Click" Padding="6,2" FontSize="11"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Background="#F2F2F2" CornerRadius="3" Padding="4,1" Margin="0,0,4,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="等待" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                                        <Button Content="⏳等待" Click="AddWait_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                        <Button Content="📸截图" Click="AddScreenshot_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                        <Button Content="🖱滚动" Click="AddScroll_Click" Padding="6,2" FontSize="11"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Background="#F2F2F2" CornerRadius="3" Padding="4,1" Margin="0,0,4,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="应用" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                                        <Button Content="📂打开" Click="AddOpenApp_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                        <Button Content="⏳等应用" Click="AddWaitForApp_Click" Padding="6,2" FontSize="11"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Background="#F2F2F2" CornerRadius="3" Padding="4,1" Margin="0,0,4,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="识别" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                                        <Button Content="📖阅读" Click="AddReadContent_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                        <Button Content="📖滚读" Click="AddScrollRead_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11"/>
+                                        <Button Content="🔍正则" Click="AddRegexMatch_Click" Padding="6,2" FontSize="11" ToolTip="正则识别屏幕内容"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Background="#F2F2F2" CornerRadius="3" Padding="4,1" Margin="0,0,4,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="控制" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                                        <Button Content="📝参数" Click="AddInputParam_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="添加动态输入参数"/>
+                                        <Button Content="🔀判断" Click="AddIf_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="条件判断分支"/>
+                                        <Button Content="↩跳转" Click="AddGoto_Click" Padding="6,2" Margin="0,0,2,0" FontSize="11" ToolTip="跳转到指定步骤"/>
+                                        <Button Content="🪟切窗" Click="AddSwitchToWindow_Click" Padding="6,2" FontSize="11" ToolTip="切换窗口到前台"/>
+                                    </StackPanel>
+                                </Border>
+
                                 <Separator Margin="4,0"/>
                                 <TextBlock Text="🤖" VerticalAlignment="Center" FontSize="11"/>
                                 <TextBox x:Name="CommandInput" Width="160" VerticalAlignment="Center" FontSize="11"

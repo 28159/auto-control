@@ -94,6 +94,11 @@ namespace WeChatAutomation.Core.Recording
         public bool IsEnabled { get; set; } = true;
         public DateTime CreatedAt { get; set; } = DateTime.Now;
 
+        /// <summary>
+        /// 步骤备注/说明，供用户标注步骤用途，不影响执行。
+        /// </summary>
+        public string? Remark { get; set; }
+
         public string Summary => ActionType switch
         {
             ActionType.Click => ClickMode == ClickMode.Coordinate

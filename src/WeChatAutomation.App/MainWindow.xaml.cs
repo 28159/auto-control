@@ -710,8 +710,17 @@ namespace WeChatAutomation.App
             { _recorder.MoveNode(n.NodeId, n.Order + 1); RefreshGrid(); }
         }
 
+        // 可内联编辑的列：双击进入单元格编辑；其他列双击打开完整编辑对话框
+        private static readonly HashSet<string> EditableHeaders = new() { "名称", "参数", "正则", "延时" };
+
         // 双击编辑
-        private void StepsGrid_MouseDoubleClick(object s, MouseButtonEventArgs e) => EditStep();
+        private void StepsGrid_MouseDoubleClick(object s, MouseButtonEventArgs e)
+        {
+            var col = StepsGrid.CurrentCell.Column;
+            if (col != null && EditableHeaders.Contains(col.Header?.ToString()))
+                return; // 可编辑列：让 DataGrid 进入内联编辑
+            EditStep();
+        }
 
         private void Edit_Click(object s, RoutedEventArgs e) => EditStep();
 
@@ -768,13 +777,26 @@ namespace WeChatAutomation.App
             var nameBox = new TextBox { Text = node.Name ?? "", Margin = new Thickness(0, 0, 0, 8) };
             sp.Children.Add(nameBox);
 
-            sp.Children.Add(new TextBlock { Text = "目标窗口标题:", Margin = new Thickness(0, 0, 0, 3) });
-            var windowTitleBox = new TextBox { Text = node.WindowTitle ?? "", Margin = new Thickness(0, 0, 0, 8), ToolTip = "留空=当前前台窗口" };
-            sp.Children.Add(windowTitleBox);
+            // 目标窗口标题（按类型显隐）
+            var winTitlePanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            winTitlePanel.Children.Add(new TextBlock { Text = "目标窗口标题:", Margin = new Thickness(0, 0, 0, 3) });
+            var windowTitleBox = new TextBox { Text = node.WindowTitle ?? "", ToolTip = "留空=当前前台窗口；切窗步骤填进程名或窗口标题" };
+            winTitlePanel.Children.Add(windowTitleBox);
+            sp.Children.Add(winTitlePanel);
 
-            sp.Children.Add(new TextBlock { Text = "参数:", Margin = new Thickness(0, 0, 0, 3) });
-            var paramBox = new TextBox { Text = node.Parameter ?? "", Margin = new Thickness(0, 0, 0, 8), TextWrapping = TextWrapping.Wrap, AcceptsReturn = true, MaxHeight = 80 };
-            sp.Children.Add(paramBox);
+            // 参数（按类型显隐）
+            var paramPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            paramPanel.Children.Add(new TextBlock { Text = "参数:", Margin = new Thickness(0, 0, 0, 3) });
+            var paramBox = new TextBox { Text = node.Parameter ?? "", TextWrapping = TextWrapping.Wrap, AcceptsReturn = true, MaxHeight = 80 };
+            paramPanel.Children.Add(paramBox);
+            sp.Children.Add(paramPanel);
+
+            // 滚动行数（Scroll/ScrollRead）
+            var scrollPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            scrollPanel.Children.Add(new TextBlock { Text = "滚动行数(正=下 负=上):", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var scrollBox = new TextBox { Text = node.ScrollAmount.ToString(), Width = 80 };
+            scrollPanel.Children.Add(scrollBox);
+            sp.Children.Add(scrollPanel);
 
             // 输出变量名（阅读/滚动阅读/正则识别步骤存内容；点击步骤存点击是否成功 true/false）
             var outputVarPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
@@ -793,10 +815,14 @@ namespace WeChatAutomation.App
             };
             sp.Children.Add(switchAllCheck);
 
-            sp.Children.Add(new TextBlock { Text = "延时(毫秒):", Margin = new Thickness(0, 0, 0, 3) });
-            var delayBox = new TextBox { Text = node.DelayMs.ToString(), Margin = new Thickness(0, 0, 0, 8), Width = 100, HorizontalAlignment = HorizontalAlignment.Left };
-            sp.Children.Add(delayBox);
+            // 延时（按类型显隐）
+            var delayPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            delayPanel.Children.Add(new TextBlock { Text = "延时(毫秒):", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var delayBox = new TextBox { Text = node.DelayMs.ToString(), Width = 100 };
+            delayPanel.Children.Add(delayBox);
+            sp.Children.Add(delayPanel);
 
+            // 点击模式（仅点击步骤）
             var clickModePanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
             clickModePanel.Children.Add(new TextBlock { Text = "点击模式:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
             var clickModeCombo = new ComboBox { Width = 120 };
@@ -807,15 +833,17 @@ namespace WeChatAutomation.App
             clickModePanel.Children.Add(clickModeCombo);
             sp.Children.Add(clickModePanel);
 
-            var visionLabelPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
-            visionLabelPanel.Children.Add(new TextBlock { Text = "视觉标签:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            // 视觉标签+置信度（点击+视觉模式）
+            var visionPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            visionPanel.Children.Add(new TextBlock { Text = "视觉标签:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
             var visionLabelBox = new TextBox { Text = node.VisionLabel ?? "", Width = 120, ToolTip = "YOLO检测目标类别，如: button, send_button, input" };
-            visionLabelPanel.Children.Add(visionLabelBox);
-            visionLabelPanel.Children.Add(new TextBlock { Text = "置信度:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 5, 0) });
+            visionPanel.Children.Add(visionLabelBox);
+            visionPanel.Children.Add(new TextBlock { Text = "置信度:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 5, 0) });
             var visionConfBox = new TextBox { Text = node.VisionConfThreshold > 0 ? node.VisionConfThreshold.ToString() : "0.5", Width = 50, ToolTip = "检测置信度阈值 (0-1)" };
-            visionLabelPanel.Children.Add(visionConfBox);
-            sp.Children.Add(visionLabelPanel);
+            visionPanel.Children.Add(visionConfBox);
+            sp.Children.Add(visionPanel);
 
+            // 坐标 X/Y（点击+非视觉模式）
             var coordPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
             coordPanel.Children.Add(new TextBlock { Text = "坐标 X:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
             var xBox = new TextBox { Text = node.X.ToString("F0"), Width = 60, Margin = new Thickness(0, 0, 10, 0) };
@@ -824,6 +852,38 @@ namespace WeChatAutomation.App
             var yBox = new TextBox { Text = node.Y.ToString("F0"), Width = 60 };
             coordPanel.Children.Add(yBox);
             sp.Children.Add(coordPanel);
+
+            // 按类型/点击模式显隐字段
+            void ApplyFieldVisibility()
+            {
+                if (!Enum.TryParse<ActionType>(typeCombo.SelectedItem?.ToString(), out var t))
+                    t = node.ActionType;
+                Enum.TryParse<WeChatAutomation.Core.Recording.ClickMode>(clickModeCombo.SelectedItem?.ToString(), out var cm);
+
+                bool isClick = t == ActionType.Click;
+                winTitlePanel.Visibility = (isClick || t == ActionType.ReadContent || t == ActionType.ScrollRead
+                    || t == ActionType.RegexMatch || t == ActionType.SwitchToWindow) ? Visibility.Visible : Visibility.Collapsed;
+                paramPanel.Visibility = (t == ActionType.TypeText || t == ActionType.SendKeys || t == ActionType.Wait
+                    || t == ActionType.InsertText || t == ActionType.OpenApp || t == ActionType.WaitForApp) ? Visibility.Visible : Visibility.Collapsed;
+                scrollPanel.Visibility = (t == ActionType.Scroll || t == ActionType.ScrollRead) ? Visibility.Visible : Visibility.Collapsed;
+                outputVarPanel.Visibility = (isClick || t == ActionType.ReadContent || t == ActionType.ScrollRead || t == ActionType.RegexMatch) ? Visibility.Visible : Visibility.Collapsed;
+                switchAllCheck.Visibility = t == ActionType.SwitchToWindow ? Visibility.Visible : Visibility.Collapsed;
+                delayPanel.Visibility = (isClick || t == ActionType.WaitForApp || t == ActionType.OpenApp
+                    || t == ActionType.TypeText || t == ActionType.SendKeys || t == ActionType.InsertText
+                    || t == ActionType.Scroll || t == ActionType.ScrollRead) ? Visibility.Visible : Visibility.Collapsed;
+                clickModePanel.Visibility = isClick ? Visibility.Visible : Visibility.Collapsed;
+                visionPanel.Visibility = (isClick && cm == WeChatAutomation.Core.Recording.ClickMode.Vision) ? Visibility.Visible : Visibility.Collapsed;
+                coordPanel.Visibility = (isClick && cm != WeChatAutomation.Core.Recording.ClickMode.Vision) ? Visibility.Visible : Visibility.Collapsed;
+            }
+
+            typeCombo.SelectionChanged += (_, _) => ApplyFieldVisibility();
+            clickModeCombo.SelectionChanged += (_, _) => ApplyFieldVisibility();
+            ApplyFieldVisibility();
+
+            // 备注（始终显示）
+            sp.Children.Add(new TextBlock { Text = "备注:", Margin = new Thickness(0, 0, 0, 3) });
+            var remarkBox = new TextBox { Text = node.Remark ?? "", Margin = new Thickness(0, 0, 0, 8), ToolTip = "步骤说明/备注，不影响执行" };
+            sp.Children.Add(remarkBox);
 
             // 按钮
             var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
@@ -841,6 +901,7 @@ namespace WeChatAutomation.App
                 node.WindowTitle = windowTitleBox.Text.Trim();
                 node.Parameter = paramBox.Text;
                 if (int.TryParse(delayBox.Text, out int d)) node.DelayMs = d;
+                if (int.TryParse(scrollBox.Text, out int sa)) node.ScrollAmount = sa;
                 if (double.TryParse(xBox.Text, out double x)) node.X = x;
                 if (double.TryParse(yBox.Text, out double y)) node.Y = y;
                 if (Enum.TryParse<WeChatAutomation.Core.Recording.ClickMode>(clickModeCombo.SelectedItem?.ToString(), out var cm)) node.ClickMode = cm;
@@ -848,6 +909,7 @@ namespace WeChatAutomation.App
                 if (float.TryParse(visionConfBox.Text, out float vc) && vc > 0) node.VisionConfThreshold = vc;
                 node.OutputParamName = string.IsNullOrWhiteSpace(outputVarBox.Text) ? null : outputVarBox.Text.Trim();
                 node.SwitchAll = switchAllCheck.IsChecked == true;
+                node.Remark = string.IsNullOrWhiteSpace(remarkBox.Text) ? null : remarkBox.Text.Trim();
                 w.DialogResult = true;
             };
 
@@ -1079,11 +1141,15 @@ namespace WeChatAutomation.App
 
         private void RefreshGrid()
         {
-            StepsGrid.ItemsSource = null;
+            // 记录当前选中项，便于刷新后恢复（不 null ItemsSource 以保留滚动位置）
+            var selectedIds = StepsGrid.SelectedItems.Cast<RecordedAction>()
+                .Select(a => a.NodeId).ToList();
             _steps.Clear();
             foreach (var n in _recorder.Nodes) _steps.Add(n);
-            StepsGrid.ItemsSource = _steps;
             StepCountText.Text = _steps.Count.ToString();
+            StepsGrid.SelectedItems.Clear();
+            foreach (var a in _steps.Where(a => selectedIds.Contains(a.NodeId)))
+                StepsGrid.SelectedItems.Add(a);
         }
 
         private void SyncStepsToRecorder()
@@ -1094,6 +1160,67 @@ namespace WeChatAutomation.App
 
         private void StepsGrid_LoadingRow(object sender, DataGridRowEventArgs e)
         {
+        }
+
+        // ═══ 拖拽排序 ═══
+        private RecordedAction _dragSource;
+        private Point _dragStartPoint;
+
+        private static T FindAncestor<T>(DependencyObject current) where T : DependencyObject
+        {
+            while (current != null && current is not T)
+                current = VisualTreeHelper.GetParent(current);
+            return current as T;
+        }
+
+        private void StepsGrid_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            // 点到行内按钮（运行/删除）时不启动拖拽，让按钮正常工作
+            if (FindAncestor<Button>(e.OriginalSource as DependencyObject) != null) { _dragSource = null; return; }
+            var row = FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject);
+            if (row?.Item is RecordedAction a)
+            {
+                _dragSource = a;
+                _dragStartPoint = e.GetPosition(null);
+            }
+            else _dragSource = null;
+        }
+
+        private void StepsGrid_PreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (_dragSource == null || e.LeftButton != MouseButtonState.Pressed) return;
+            Point pos = e.GetPosition(null);
+            if (Math.Abs(pos.X - _dragStartPoint.X) < SystemParameters.MinimumHorizontalDragDistance
+                && Math.Abs(pos.Y - _dragStartPoint.Y) < SystemParameters.MinimumVerticalDragDistance)
+                return;
+            DragDrop.DoDragDrop(StepsGrid, _dragSource, DragDropEffects.Move);
+        }
+
+        private void StepsGrid_DragOver(object sender, DragEventArgs e)
+        {
+            e.Effects = _dragSource != null ? DragDropEffects.Move : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        private void StepsGrid_Drop(object sender, DragEventArgs e)
+        {
+            if (_dragSource == null) return;
+            var row = FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject);
+            if (row?.Item is not RecordedAction target) { _dragSource = null; return; }
+
+            // 拖动整组选中项（至少含拖动源），按当前顺序排列
+            var moving = StepsGrid.SelectedItems.Cast<RecordedAction>().Where(a => _steps.Contains(a)).ToList();
+            if (moving.Count == 0 || !moving.Contains(_dragSource)) moving = new List<RecordedAction> { _dragSource };
+            if (moving.Contains(target)) { _dragSource = null; return; } // 拖到自身所选组内，无操作
+
+            foreach (var a in moving) _steps.Remove(a);
+            int insertAt = _steps.IndexOf(target);
+            if (insertAt < 0) insertAt = _steps.Count;
+            for (int i = 0; i < moving.Count; i++) _steps.Insert(insertAt + i, moving[i]);
+
+            SyncStepsToRecorder();
+            RefreshGrid();
+            _dragSource = null;
         }
 
         private async void RunSingleAction_Click(object sender, RoutedEventArgs e)
@@ -1431,13 +1558,14 @@ namespace WeChatAutomation.App
         {
             if (_steps.Count == 0) { MessageBox.Show("没有步骤可保存"); return; }
 
-            // 获取现有参数（如果有）
+            // 获取现有参数与创建时间（如果有）
             List<ScriptParameter> existingParams = null;
+            RecordingFile existingRec = null;
             if (_currentScript != null)
             {
                 try
                 {
-                    var existingRec = ActionRecorder.LoadFromFile(_currentScript.FilePath);
+                    existingRec = ActionRecorder.LoadFromFile(_currentScript.FilePath);
                     existingParams = existingRec.Parameters;
                 }
                 catch { }
@@ -1448,7 +1576,7 @@ namespace WeChatAutomation.App
                 var rec = new RecordingFile
                 {
                     Name = _currentScript.Name,
-                    CreatedAt = DateTime.Now,
+                    CreatedAt = existingRec?.CreatedAt ?? DateTime.Now,
                     Actions = _steps.ToList(),
                     Parameters = existingParams ?? new List<ScriptParameter>(),
                     DefaultClickMode = _currentClickMode,

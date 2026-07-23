@@ -12,25 +12,73 @@
 
         <!-- 工具栏 -->
         <Border Grid.Row="0" Background="#F5F5F5" Padding="8,5">
-            <StackPanel Orientation="Horizontal">
+            <WrapPanel>
                 <Button x:Name="RecordBtn" Content="⏺ 录制" Click="RecordBtn_Click" Padding="10,5" Margin="0,0,5,0" Background="#E53935" Foreground="White" FontWeight="Bold" ToolTip="开始/停止录制（F9）"/>
                 <Button Content="💾 保存" Click="SaveBtn_Click" Padding="10,5" Margin="0,0,5,0"/>
                 <Separator Margin="5,0"/>
+
                 <TextBlock Text="新增:" VerticalAlignment="Center" Margin="5,0,3,0" FontWeight="SemiBold" FontSize="11"/>
-                <Button Content="👆点击" Tag="Click" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
-                <Button Content="⌨输入" Tag="TypeText" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
-                <Button Content="⏳等待" Tag="Wait" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
-                <Button Content="📸截图" Tag="Screenshot" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
-                <Button Content="📖阅读" Tag="ReadContent" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
-                <Button Content="🔍正则" Tag="RegexMatch" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
-                <Button Content="🪟切窗" Tag="SwitchToWindow" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
-                <Button Content="🔀判断" Tag="If" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
-                <Button Content="↩跳转" Tag="Goto" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
-                <Separator Margin="5,0"/>
-                <Button Content="🔍+" Click="ZoomIn_Click" Padding="8,3" Margin="0,0,2,0" FontSize="11"/>
-                <Button Content="🔍-" Click="ZoomOut_Click" Padding="8,3" Margin="0,0,2,0" FontSize="11"/>
+
+                <Border Background="#EEEEEE" CornerRadius="3" Padding="4,1" Margin="2,0,3,0">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="点击" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                        <Button Content="👆点击" Tag="Click" Click="AddStepBtn_Click" Padding="6,3" FontSize="11"/>
+                    </StackPanel>
+                </Border>
+
+                <Border Background="#EEEEEE" CornerRadius="3" Padding="4,1" Margin="0,0,3,0">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="输入" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                        <Button Content="⌨输入" Tag="TypeText" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="🔤按键" Tag="SendKeys" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="📋复制" Tag="Copy" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="📄粘贴" Tag="Paste" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="✏插入" Tag="InsertText" Click="AddStepBtn_Click" Padding="6,3" FontSize="11"/>
+                    </StackPanel>
+                </Border>
+
+                <Border Background="#EEEEEE" CornerRadius="3" Padding="4,1" Margin="0,0,3,0">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="等待" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                        <Button Content="⏳等待" Tag="Wait" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="📸截图" Tag="Screenshot" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="🖱滚动" Tag="Scroll" Click="AddStepBtn_Click" Padding="6,3" FontSize="11"/>
+                    </StackPanel>
+                </Border>
+
+                <Border Background="#EEEEEE" CornerRadius="3" Padding="4,1" Margin="0,0,3,0">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="应用" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                        <Button Content="📂打开" Tag="OpenApp" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="⏳等应用" Tag="WaitForApp" Click="AddStepBtn_Click" Padding="6,3" FontSize="11"/>
+                    </StackPanel>
+                </Border>
+
+                <Border Background="#EEEEEE" CornerRadius="3" Padding="4,1" Margin="0,0,3,0">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="识别" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                        <Button Content="📖阅读" Tag="ReadContent" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="📖滚读" Tag="ScrollRead" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="🔍正则" Tag="RegexMatch" Click="AddStepBtn_Click" Padding="6,3" FontSize="11"/>
+                    </StackPanel>
+                </Border>
+
+                <Border Background="#EEEEEE" CornerRadius="3" Padding="4,1" Margin="0,0,5,0">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="控制" VerticalAlignment="Center" FontSize="9" Foreground="#888" Margin="0,0,3,0"/>
+                        <Button Content="📝参数" Tag="InputParam" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="🔀判断" Tag="If" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="↩跳转" Tag="Goto" Click="AddStepBtn_Click" Padding="6,3" Margin="0,0,2,0" FontSize="11"/>
+                        <Button Content="🪟切窗" Tag="SwitchToWindow" Click="AddStepBtn_Click" Padding="6,3" FontSize="11"/>
+                    </StackPanel>
+                </Border>
+
+                <Separator Margin="3,0"/>
+                <Button Content="🔍+" Click="ZoomIn_Click" Padding="8,3" Margin="0,0,2,0" FontSize="11" ToolTip="放大"/>
+                <Button Content="🔍-" Click="ZoomOut_Click" Padding="8,3" Margin="0,0,2,0" FontSize="11" ToolTip="缩小"/>
                 <Button Content="适应" Click="FitToWindow_Click" Padding="8,3" FontSize="11" ToolTip="重置缩放并适应窗口"/>
-            </StackPanel>
+                <TextBlock Text="（Ctrl+滚轮缩放）" VerticalAlignment="Center" FontSize="10" Foreground="#999" Margin="5,0,0,0"/>
+            </WrapPanel>
         </Border>
 
         <!-- 主区域 -->
@@ -42,7 +90,8 @@
 
             <!-- 画布区域 -->
             <Border Grid.Column="0" BorderBrush="#E0E0E0" BorderThickness="0,0,1,0">
-                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Background="#FAFAFA">
+                <ScrollViewer x:Name="CanvasScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Background="#FAFAFA"
+                              PreviewMouseWheel="CanvasScroll_PreviewMouseWheel">
                     <Canvas x:Name="FlowCanvas"/>
                 </ScrollViewer>
             </Border>
