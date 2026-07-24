@@ -161,6 +161,38 @@ namespace WeChatAutomation.Core.Services
 
                 _app.MapGet("/api/health", () => Results.Ok("OK"));
 
+                // ═══ HttpWait 等待信号接口 ═══
+                // 外部系统 POST /api/wait/{key}，请求体作为传入内容唤醒对应的 HttpWait 步骤。
+                _app.MapPost("/api/wait/{key}", async (string key, HttpRequest request) =>
+                {
+                    try
+                    {
+                        using var reader = new StreamReader(request.Body);
+                        string payload = await reader.ReadToEndAsync();
+                        bool delivered = WaitSignalHub.Signal(key, payload);
+                        return delivered
+                            ? Results.Ok(new { key, delivered = true, message = "已唤醒等待步骤" })
+                            : Results.NotFound(new { key, delivered = false, message = "无等待该 key 的步骤" });
+                    }
+                    catch (Exception ex)
+                    {
+                        return Results.BadRequest(new { key, error = ex.Message });
+                    }
+                });
+
+                // GET 版本：便于浏览器/简单触发，query string 作为传入内容
+                _app.MapGet("/api/wait/{key}", (string key, HttpRequest request) =>
+                {
+                    string payload = request.QueryString.HasValue ? request.QueryString.Value ?? "" : "";
+                    bool delivered = WaitSignalHub.Signal(key, payload);
+                    return delivered
+                        ? Results.Ok(new { key, delivered = true, message = "已唤醒等待步骤" })
+                        : Results.NotFound(new { key, delivered = false, message = "无等待该 key 的步骤" });
+                });
+
+                // 查询当前等待中的 key
+                _app.MapGet("/api/wait", () => Results.Ok(new { pending = WaitSignalHub.PendingKeys }));
+
                 // ═══ 任务轮询管理接口 ═══
 
                 _app.MapGet("/api/task-polling/status", () =>

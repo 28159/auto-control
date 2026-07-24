@@ -107,9 +107,11 @@ namespace WeChatAutomation.Core.Native
 
                     try
                     {
-                        var element = _automation.FromPoint(new System.Drawing.Point(capturedX, capturedY));
-                        if (element != null)
+                        var rawElement = _automation.FromPoint(new System.Drawing.Point(capturedX, capturedY));
+                        if (rawElement != null)
                         {
+                            // 将非交互式元素（Text、Image、Pane、Group）提升到最近的交互式祖先
+                            var element = PromoteToInteractive(rawElement);
                             info.ClassName = element.ClassName ?? "";
                             info.ElementName = element.Name ?? "";
                             info.AutomationId = element.AutomationId ?? "";
@@ -134,7 +136,7 @@ namespace WeChatAutomation.Core.Native
                                 catch { /* 父级遍历失败则忽略 */ }
                             }
 
-                            // 构建 XPath 路径
+                            // 构建 XPath 路径（使用提升后的元素）
                             try
                             {
                                 info.XPath = XPathBuilder.BuildXPath(element);
@@ -166,6 +168,90 @@ namespace WeChatAutomation.Core.Native
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// 将非交互式元素（Text、Image、Pane、Group）提升到最近的交互式祖先。
+        /// FromPoint 返回最深层叶子，但用户实际点击的是交互式父元素（如 Button）。
+        /// </summary>
+        private static FlaUI.Core.AutomationElements.AutomationElement PromoteToInteractive(
+            FlaUI.Core.AutomationElements.AutomationElement element)
+        {
+            if (element == null) return element;
+
+            // 非交互式 ControlType：这些元素通常不可直接点击，是交互式控件的子元素
+            var nonInteractiveTypes = new HashSet<FlaUI.Core.Definitions.ControlType>
+            {
+                FlaUI.Core.Definitions.ControlType.Text,
+                FlaUI.Core.Definitions.ControlType.Image,
+                FlaUI.Core.Definitions.ControlType.Pane,
+                FlaUI.Core.Definitions.ControlType.Group,
+                FlaUI.Core.Definitions.ControlType.Header,
+                FlaUI.Core.Definitions.ControlType.HeaderItem,
+                FlaUI.Core.Definitions.ControlType.Separator,
+            };
+
+            // 不应作为提升终点的 ControlType：Window/TitleBar/Custom/Thumb 等
+            // 这些虽不在 nonInteractiveTypes 中，但作为提升终点会丢失控件信息（捕获到窗口级元数据）
+            var stopBarrierTypes = new HashSet<FlaUI.Core.Definitions.ControlType>
+            {
+                FlaUI.Core.Definitions.ControlType.Window,
+                FlaUI.Core.Definitions.ControlType.TitleBar,
+                FlaUI.Core.Definitions.ControlType.Custom,
+                FlaUI.Core.Definitions.ControlType.Thumb,
+            };
+
+            var current = element;
+            int maxSteps = 5;
+            bool promoted = false;
+
+            while (current != null && maxSteps-- > 0)
+            {
+                // 遇到不应作为提升终点的类型（如 Window），停止且不提升到此元素
+                if (stopBarrierTypes.Contains(current.ControlType))
+                    break;
+
+                // 当前元素是交互式类型且不在屏障集合中，停止提升
+                if (!nonInteractiveTypes.Contains(current.ControlType))
+                {
+                    promoted = true;
+                    break;
+                }
+
+                // 当前元素支持 InvokePattern（可点击），停止提升
+                try
+                {
+                    var invokePattern = current.Patterns.Invoke.PatternOrDefault;
+                    if (invokePattern != null) { promoted = true; break; }
+                }
+                catch { }
+
+                // 向上提升到父元素
+                try
+                {
+                    var parent = current.Parent;
+                    if (parent == null) break; // 已到达根节点
+                    current = parent;
+                }
+                catch
+                {
+                    break; // 无法获取父元素
+                }
+            }
+
+            // 若提升命中了屏障类型（Window 等）或未找到合适终点，回退到原始元素，
+            // 避免捕获窗口级元数据（ClassName=窗口类、Name=窗口标题）导致回放定位错误
+            if (!promoted)
+                current = element;
+
+            // 日志记录提升情况
+            if (current != null && !ReferenceEquals(element, current))
+            {
+                _logger.Info("MouseHook",
+                    $"元素提升: {element.ControlType}[@Name='{element.Name}'] -> {current.ControlType}[@Name='{current.Name}']");
+            }
+
+            return current ?? element;
         }
 
         public void Dispose() => StopCapture();

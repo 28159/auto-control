@@ -33,7 +33,10 @@ namespace WeChatAutomation.Core.Recording
 
                 while (current != null && depth <= MaxDepth)
                 {
-                    string step = BuildElementStep(current);
+                    // 叶子节点（链的第一个，即用户实际点击的元素）保留同级索引消歧；
+                    // 中间容器不加索引（其同类型兄弟顺序跨账号/跨次启动最不稳定）
+                    bool isLeaf = chain.Count == 0;
+                    string step = BuildElementStep(current, isLeaf);
                     if (string.IsNullOrEmpty(step)) break;
 
                     chain.Add(step);
@@ -63,8 +66,9 @@ namespace WeChatAutomation.Core.Recording
         }
 
         /// <summary>
-        /// 计算同级索引：在同级中，与目标元素具有相同 ControlType 的元素里，
-        /// 目标元素是第几个（0-based）。
+        /// 计算同级索引：在同级中，与目标元素具有相同 ControlType 且相同 Name 的元素里，
+        /// 目标元素是第几个（0-based）。基于 ControlType+Name 计数比仅 ControlType 更稳定，
+        /// 能在同名按钮间准确消歧，不受无关同类型元素顺序变化影响。
         /// </summary>
         public static int ComputeSiblingIndex(AutomationElement element)
         {
@@ -75,12 +79,22 @@ namespace WeChatAutomation.Core.Recording
                 var parent = element.Parent;
                 if (parent == null) return 0;
 
+                string targetName = "";
+                try { targetName = element.Name ?? ""; } catch { }
+
                 var siblings = parent.FindAllChildren();
                 int index = 0;
                 foreach (var child in siblings)
                 {
                     if (child.Equals(element)) return index;
-                    if (child.ControlType == element.ControlType) index++;
+                    // 仅统计同 ControlType 且同 Name 的兄弟，使索引在同名元素间稳定
+                    if (child.ControlType == element.ControlType)
+                    {
+                        string childName = "";
+                        try { childName = child.Name ?? ""; } catch { }
+                        if (string.Equals(childName, targetName, StringComparison.Ordinal))
+                            index++;
+                    }
                 }
                 return 0;
             }
@@ -111,8 +125,9 @@ namespace WeChatAutomation.Core.Recording
         /// <summary>
         /// 构建单个元素的 XPath 步骤，如 Button[@AutomationId='sendBtn' and @Name='发送'][2]
         /// 尽可能组合多个属性，提高定位精度。
+        /// 仅叶子节点（isLeaf=true）附加同级索引用于消歧；中间容器不加索引。
         /// </summary>
-        private static string BuildElementStep(AutomationElement element)
+        private static string BuildElementStep(AutomationElement element, bool isLeaf)
         {
             try
             {
@@ -149,9 +164,13 @@ namespace WeChatAutomation.Core.Recording
 
                 string predicateStr = predicates.Count > 0 ? $"[{string.Join(" and ", predicates)}]" : "";
 
-                // 同级索引
-                int siblingIdx = ComputeSiblingIndex(element);
-                string indexStr = siblingIdx > 0 ? $"[{siblingIdx + 1}]" : "";
+                // 仅叶子节点保留同级索引消歧；中间容器不加索引（顺序不稳定）
+                string indexStr = "";
+                if (isLeaf)
+                {
+                    int siblingIdx = ComputeSiblingIndex(element);
+                    indexStr = siblingIdx > 0 ? $"[{siblingIdx + 1}]" : "";
+                }
 
                 return $"{controlTypeName}{predicateStr}{indexStr}";
             }

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,6 +11,7 @@ using FlaUI.Core.Conditions;
 using FlaUI.UIA3;
 using WeChatAutomation.Core.Logging;
 using WeChatAutomation.Core.Native;
+using WeChatAutomation.Core.Services;
 using WeChatAutomation.Core.Vision;
 
 namespace WeChatAutomation.Core.Recording
@@ -27,6 +30,7 @@ namespace WeChatAutomation.Core.Recording
         private AutomationElement _targetElement = null; // 用户选择的具体 UIA 元素（用于阅读）
         private readonly HumanInputSimulator _simulator = new();
         private VisionDetector _visionDetector;
+        private static readonly System.Net.Http.HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(60) };
 
         public bool IsPlaying => _isPlaying;
         private readonly List<ReadContentResult> _readResults = new();
@@ -52,52 +56,42 @@ namespace WeChatAutomation.Core.Recording
             _targetElement = element;
         }
 
-        public bool InitVisionDetector(string modelPath, string labelsPath = null)
+        public bool InitVisionDetector(string templatePath, string labelsPath = null)
         {
             _visionDetector?.Dispose();
             _visionDetector = new VisionDetector();
-            return _visionDetector.LoadModel(modelPath, labelsPath);
+            return _visionDetector.LoadModel(templatePath, labelsPath);
+        }
+
+        /// <summary>直接从 Bitmap 加载模板到检测器（录制后即时回放单步用）。</summary>
+        public bool InitVisionDetectorFromBitmap(Bitmap template, string label)
+        {
+            _visionDetector?.Dispose();
+            _visionDetector = new VisionDetector();
+            return _visionDetector.LoadTemplateFromBitmap(template, label);
         }
 
         public bool IsVisionReady => _visionDetector?.IsLoaded == true;
 
-        /// <summary>当前视觉检测器（UI 可读取模型元数据；勿 Dispose）。</summary>
+        /// <summary>当前视觉检测器（UI 可读取模板元数据；勿 Dispose）。</summary>
         public Vision.VisionDetector VisionDetector => _visionDetector;
 
         /// <summary>
-        /// 当前已加载模型的文件名（便于判断是否需要切换）。
+        /// 当前已加载模板的文件名（便于判断是否需要切换）。
         /// </summary>
         public string LoadedModelFileName =>
-            _visionDetector?.IsLoaded == true && !string.IsNullOrEmpty(_visionDetector.ModelPath)
-                ? System.IO.Path.GetFileName(_visionDetector.ModelPath)
+            _visionDetector?.IsLoaded == true && !string.IsNullOrEmpty(_visionDetector.TemplatePath)
+                ? System.IO.Path.GetFileName(_visionDetector.TemplatePath)
                 : null;
 
         /// <summary>
-        /// 按文件名（位于运行目录 models/ 下）确保视觉模型已加载；若已是该模型则跳过。
-        /// modelFileName 为空或不存在时回退到默认 yolov8n-ui.onnx。
-        /// 返回是否就绪。
+        /// 确保视觉检测器就绪。模板匹配模式下无需全局模型，仅做轻量检查。
+        /// 保留方法名以减少上层调用改动；实际模板在每个 Vision 步骤执行时按需加载。
         /// </summary>
         public bool EnsureVisionModel(string modelFileName)
         {
-            if (!string.IsNullOrEmpty(LoadedModelFileName) &&
-                string.Equals(LoadedModelFileName, modelFileName, StringComparison.OrdinalIgnoreCase))
-            {
-                return true; // 已是同一模型，复用
-            }
-
-            string modelsDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "models");
-            string fileName = !string.IsNullOrWhiteSpace(modelFileName) ? modelFileName : "yolov8n-ui.onnx";
-            string modelPath = System.IO.Path.Combine(modelsDir, fileName);
-
-            if (System.IO.File.Exists(modelPath))
-            {
-                bool ok = InitVisionDetector(modelPath);
-                OnLog(ok ? $"视觉模型已加载: {fileName}" : $"视觉模型加载失败: {modelPath}");
-                return ok;
-            }
-
-            OnLog($"视觉模型文件不存在: {modelPath}");
-            return false;
+            // 模板匹配模式：检测器在 DoClickByVisionAsync 中按步骤加载，此处仅返回 true
+            return true;
         }
         public event EventHandler<string> LogMessage;
         public event EventHandler PlayCompleted;
@@ -117,8 +111,19 @@ namespace WeChatAutomation.Core.Recording
         /// <summary>请求停止当前脚本后续步骤（由 If-TargetScript 逻辑设置）</summary>
         private bool _stopRequested;
 
+        /// <summary>循环控制信号：Break 置位让当前循环体执行列表立即退出并结束循环。</summary>
+        private bool _loopBreak;
+        /// <summary>循环控制信号：Continue 置位让当前循环体执行列表立即退出但进入下一轮。</summary>
+        private bool _loopContinue;
+
         /// <summary>子脚本执行结果（SubScriptRequested 处理方回填），null=未执行/执行失败</summary>
         private bool? _subScriptSuccess;
+
+        /// <summary>
+        /// 定位重试期间静默 UIA 诊断日志（段修剪/未找到等）。
+        /// 回放串行执行，该标志仅在单次 TryLocateElement 调用期间置位，不会影响并发。
+        /// </summary>
+        private bool _mutedLocateLog;
 
         /// <summary>
         /// 执行子脚本：触发 SubScriptRequested 事件，由 ScriptExecutor 订阅执行。
@@ -168,47 +173,60 @@ namespace WeChatAutomation.Core.Recording
             _variables.Clear();
             _visionResults.Clear();
             _stopRequested = false;
+            _loopBreak = false;
+            _loopContinue = false;
             _subScriptSuccess = null;
-            // 注意：不清除 _targetWindow 和 _targetElement，它们是用户通过 PickTargetWindow 选择的阅读目标
+            _totalIterations = 0;
             OnLog($"开始回放，共 {nodes.Count} 步" +
                   (string.IsNullOrEmpty(visionModelFileName) ? "" : $"（视觉模型: {visionModelFileName}）"));
 
-            // 构建 NodeId → 索引映射，供 If/Goto 跳转使用
-            var nodeIndexMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            for (int i = 0; i < nodes.Count; i++)
-                if (!string.IsNullOrEmpty(nodes[i].NodeId))
-                    nodeIndexMap[nodes[i].NodeId] = i;
-
             try
             {
-                int currentIndex = 0;
-                int iterations = 0;
-                const int maxIterations = 10000; // 防止死循环
-
-                while (currentIndex < nodes.Count && iterations++ < maxIterations)
-                {
-                    if (_cts.IsCancellationRequested) break;
-                    if (_stopRequested) break; // If-TargetScript 请求停止后续步骤
-                    var node = nodes[currentIndex];
-                    if (!node.IsEnabled) { currentIndex++; continue; }
-                    if (node.DelayMs > 0) await Task.Delay(node.DelayMs, _cts.Token);
-
-                    int? jumpTo = await ExecuteNode(node, nodeIndexMap);
-                    currentIndex = jumpTo.HasValue ? jumpTo.Value : currentIndex + 1;
-                }
+                await ExecuteActionList(nodes);
 
                 if (_stopRequested)
                     OnLog(_subScriptSuccess == true ? "已执行子脚本并停止当前脚本" : "已停止当前脚本后续步骤");
-                else if (iterations >= maxIterations)
-                    OnLog($"回放达到最大迭代次数 ({maxIterations})，可能存在死循环，已中止");
+                else if (_totalIterations >= MaxTotalIterations)
+                    OnLog($"回放达到最大迭代次数 ({MaxTotalIterations})，可能存在死循环，已中止");
 
-                if (!_cts.IsCancellationRequested && !_stopRequested && iterations < maxIterations)
+                if (!_cts.IsCancellationRequested && !_stopRequested && _totalIterations < MaxTotalIterations)
                 { OnLog("回放完成"); PlayCompleted?.Invoke(this, EventArgs.Empty); }
             }
             catch (OperationCanceledException) { OnLog("回放已取消"); }
             catch (Exception ex) { OnLog($"回放异常: {ex.Message}"); PlayError?.Invoke(this, ex.Message); }
             finally { _isPlaying = false; _cts?.Dispose(); _cts = null; }
         }
+
+        /// <summary>执行一组步骤列表（主流程或 If 分支子步骤），支持递归调用。</summary>
+        private async Task ExecuteActionList(List<RecordedAction> nodes)
+        {
+            if (nodes == null || nodes.Count == 0) return;
+
+            // 每个列表构建自己的 NodeId→索引映射（Goto 仅在当前列表范围内跳转）
+            var nodeIndexMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < nodes.Count; i++)
+                if (!string.IsNullOrEmpty(nodes[i].NodeId))
+                    nodeIndexMap[nodes[i].NodeId] = i;
+
+            int currentIndex = 0;
+            while (currentIndex < nodes.Count && _totalIterations++ < MaxTotalIterations)
+            {
+                if (_cts.IsCancellationRequested) break;
+                if (_stopRequested) break;
+                // 循环控制信号：Break/Continue 让当前执行列表（可能是循环体）立即退出
+                if (_loopBreak || _loopContinue) break;
+                var node = nodes[currentIndex];
+                if (!node.IsEnabled) { currentIndex++; continue; }
+                if (node.DelayMs > 0) await Task.Delay(node.DelayMs, _cts.Token);
+
+                int? jumpTo = await ExecuteNode(node, nodeIndexMap);
+                currentIndex = jumpTo.HasValue ? jumpTo.Value : currentIndex + 1;
+            }
+        }
+
+        /// <summary>跨递归调用的总迭代计数，防止死循环。</summary>
+        private int _totalIterations;
+        private const int MaxTotalIterations = 100000;
 
         private async Task<int?> ExecuteNode(RecordedAction node, Dictionary<string, int> nodeIndexMap)
         {
@@ -318,37 +336,81 @@ namespace WeChatAutomation.Core.Recording
                             OnLog($"判断: {Trunc(ifExpr ?? "", 40)} -> {(condResult ? "true" : "false")}");
                         }
 
-                        // 新模式：设置了 TargetScript 时，成立->执行子脚本并停止；不成立->直接停止
-                        if (!string.IsNullOrEmpty(resolvedNode.TargetScript))
+                        // 新版分支行为：成立走 TrueBranch，不成立走 FalseBranch，各自 4 种行为。
+                        // 行为为 Continue(默认) 时回退旧字段逻辑，兼容旧脚本。
+                        IfBranchAction branchAction = condResult ? resolvedNode.TrueBranch : resolvedNode.FalseBranch;
+                        string? branchScript = condResult ? resolvedNode.TrueBranchScript : resolvedNode.FalseBranchScript;
+                        var branchActions = condResult ? resolvedNode.TrueActions : resolvedNode.FalseActions;
+                        string branchName = condResult ? "成立" : "不成立";
+
+                        // 旧脚本兼容：行为为 Continue 时按旧字段推断
+                        if (branchAction == IfBranchAction.Continue)
                         {
-                            if (condResult)
+                            // 旧 TargetScript 模式：成立->执行子脚本并停止；不成立->停止
+                            if (condResult && !string.IsNullOrEmpty(resolvedNode.TargetScript))
                             {
                                 OnLog($"  -> 条件成立，执行子脚本: {resolvedNode.TargetScript}（执行完停止当前脚本）");
                                 _subScriptSuccess = ExecuteSubScript(resolvedNode.TargetScript);
                                 _stopRequested = true;
+                                return null;
                             }
-                            else
+                            if (!condResult && !string.IsNullOrEmpty(resolvedNode.TargetScript))
                             {
                                 OnLog($"  -> 条件不成立，停止当前脚本后续步骤");
                                 _stopRequested = true;
+                                return null;
                             }
-                            return null;
+
+                            // 旧树形分支模式：有子步骤时递归执行对应分支，执行完继续主流程
+                            if (branchActions != null && branchActions.Count > 0)
+                            {
+                                OnLog($"  -> 执行{(condResult ? "True" : "False")}分支子步骤 ({branchActions.Count} 步)");
+                                await ExecuteActionList(branchActions);
+                                break; // 子步骤执行完继续主流程下一步
+                            }
+
+                            // 旧跳转模式
+                            string? gotoId = condResult ? node.TrueGotoNodeId : node.GotoNodeId;
+                            if (!string.IsNullOrEmpty(gotoId) && nodeIndexMap.TryGetValue(gotoId, out int gotoIdx))
+                            {
+                                OnLog($"  -> 跳转到 {(condResult ? "true" : "false")} 分支: {gotoId}");
+                                return gotoIdx;
+                            }
+                            // 无任何配置则继续下一步
+                            break;
                         }
 
-                        // 旧模式：跳转目标
-                        if (condResult && !string.IsNullOrEmpty(node.TrueGotoNodeId)
-                            && nodeIndexMap.TryGetValue(node.TrueGotoNodeId, out int trueIdx))
+                        // 新版显式行为分派
+                        switch (branchAction)
                         {
-                            OnLog($"  -> 跳转到 true 分支: {node.TrueGotoNodeId}");
-                            return trueIdx;
+                            case IfBranchAction.RunScript:
+                                OnLog($"  -> 条件{branchName}，执行子脚本: {branchScript}（执行完停止当前脚本）");
+                                _subScriptSuccess = ExecuteSubScript(branchScript ?? "");
+                                _stopRequested = true;
+                                return null;
+
+                            case IfBranchAction.RunActions:
+                                if (branchActions != null && branchActions.Count > 0)
+                                {
+                                    OnLog($"  -> 条件{branchName}，执行分支子动作 ({branchActions.Count} 步) 后停止当前脚本");
+                                    await ExecuteActionList(branchActions);
+                                }
+                                else
+                                {
+                                    OnLog($"  -> 条件{branchName}，分支无子动作，停止当前脚本");
+                                }
+                                _stopRequested = true;
+                                return null;
+
+                            case IfBranchAction.Stop:
+                                OnLog($"  -> 条件{branchName}，停止当前脚本执行");
+                                _stopRequested = true;
+                                return null;
+
+                            default: // Continue：继续主流程下一步
+                                OnLog($"  -> 条件{branchName}，继续主流程");
+                                break;
                         }
-                        else if (!condResult && !string.IsNullOrEmpty(node.GotoNodeId)
-                            && nodeIndexMap.TryGetValue(node.GotoNodeId, out int falseIdx))
-                        {
-                            OnLog($"  -> 跳转到 false 分支: {node.GotoNodeId}");
-                            return falseIdx;
-                        }
-                        // 无跳转目标则继续下一步
                         break;
                     }
 
@@ -364,6 +426,157 @@ namespace WeChatAutomation.Core.Recording
                 case ActionType.SwitchToWindow:
                     DoSwitchToWindow(resolvedNode);
                     break;
+
+                case ActionType.While:
+                    {
+                        // 条件循环：条件成立时重复执行 TrueActions（循环体）
+                        int max = resolvedNode.MaxLoopCount > 0 ? resolvedNode.MaxLoopCount : 1000;
+                        int iter = 0;
+                        while (iter < max && !_cts.IsCancellationRequested && !_stopRequested)
+                        {
+                            // 求值循环条件（复用 If 的便捷模式：空表达式+OutputParamName 则判断是否有值）
+                            bool keep;
+                            if (string.IsNullOrWhiteSpace(resolvedNode.ConditionExpression) && !string.IsNullOrEmpty(resolvedNode.OutputParamName))
+                            {
+                                string val = GetVariable(resolvedNode.OutputParamName) ?? "";
+                                keep = !string.IsNullOrWhiteSpace(val)
+                                    && !val.Equals("0", StringComparison.OrdinalIgnoreCase)
+                                    && !val.Equals("false", StringComparison.OrdinalIgnoreCase);
+                            }
+                            else
+                            {
+                                keep = EvaluateCondition(resolvedNode.ConditionExpression);
+                            }
+                            if (!keep) { OnLog($"  循环结束（条件不成立），共执行 {iter} 轮"); break; }
+
+                            iter++;
+                            OnLog($"  循环第 {iter} 轮（上限 {max}）");
+                            await ExecuteActionList(resolvedNode.TrueActions ?? new List<RecordedAction>());
+
+                            // Break：结束循环
+                            if (_loopBreak) { _loopBreak = false; _loopContinue = false; OnLog($"  循环被 Break 跳出，共执行 {iter} 轮"); break; }
+                            // Continue：清除信号，进入下一轮
+                            if (_loopContinue) { _loopContinue = false; }
+                        }
+                        if (iter >= max && !_stopRequested)
+                            OnLog($"  循环达到上限 {max}，已中止（可能死循环）");
+                        break;
+                    }
+
+                case ActionType.Loop:
+                    {
+                        // 固定次数循环
+                        int count = resolvedNode.LoopCount > 0 ? resolvedNode.LoopCount : 0;
+                        for (int i = 0; i < count; i++)
+                        {
+                            if (_cts.IsCancellationRequested || _stopRequested) break;
+                            OnLog($"  固定循环第 {i + 1}/{count} 轮");
+                            await ExecuteActionList(resolvedNode.TrueActions ?? new List<RecordedAction>());
+                            if (_loopBreak) { _loopBreak = false; _loopContinue = false; OnLog($"  循环被 Break 跳出，已执行 {i + 1} 轮"); break; }
+                            if (_loopContinue) { _loopContinue = false; }
+                        }
+                        break;
+                    }
+
+                case ActionType.Try:
+                    {
+                        // 容错：执行 Try 体，异常时执行 Catch 体
+                        try
+                        {
+                            OnLog("  Try 执行体");
+                            await ExecuteActionList(resolvedNode.TrueActions ?? new List<RecordedAction>());
+                        }
+                        catch (Exception ex)
+                        {
+                            OnLog($"  Try 体异常: {ex.Message} -> 执行 Catch 体");
+                            try { await ExecuteActionList(resolvedNode.FalseActions ?? new List<RecordedAction>()); }
+                            catch (Exception ex2) { OnLog($"  Catch 体异常: {ex2.Message}"); }
+                        }
+                        break;
+                    }
+
+                case ActionType.Break:
+                    OnLog("  Break：跳出当前循环");
+                    _loopBreak = true;
+                    break;
+
+                case ActionType.Continue:
+                    OnLog("  Continue：进入下一轮");
+                    _loopContinue = true;
+                    break;
+
+                case ActionType.HttpWait:
+                    {
+                        string key = resolvedNode.WaitKey ?? "";
+                        if (string.IsNullOrWhiteSpace(key))
+                        {
+                            OnLog("等待HTTP失败: 未设置 key");
+                            break;
+                        }
+                        int timeout = resolvedNode.WaitTimeoutMs;
+                        OnLog($"等待外部 HTTP 触发: key={key}" + (timeout > 0 ? $"（超时 {timeout}ms）" : "（无限等待）") +
+                              $"，可 POST /api/wait/{key} 唤醒");
+                        try
+                        {
+                            string? payload = await WaitSignalHub.WaitAsync(key, timeout, _cts.Token);
+                            OnLog($"已收到 HTTP 触发: key={key}" + (payload != null ? $"，内容长度 {payload.Length}" : ""));
+                            if (!string.IsNullOrEmpty(resolvedNode.ResponseVarName) && payload != null)
+                                SetVariable(resolvedNode.ResponseVarName, payload);
+                        }
+                        catch (TimeoutException)
+                        {
+                            OnLog($"等待HTTP超时: key={key}");
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            OnLog($"等待HTTP被取消: key={key}");
+                            throw;
+                        }
+                        break;
+                    }
+
+                case ActionType.HttpCall:
+                    {
+                        try
+                        {
+                            string url = resolvedNode.HttpUrl ?? "";
+                            if (string.IsNullOrWhiteSpace(url)) { OnLog("调用HTTP失败: 未设置 URL"); break; }
+                            var method = new System.Net.Http.HttpMethod(
+                                string.IsNullOrWhiteSpace(resolvedNode.HttpMethod) ? "GET" : resolvedNode.HttpMethod.ToUpperInvariant());
+                            using var reqMsg = new System.Net.Http.HttpRequestMessage(method, url);
+
+                            // 请求头（每行 Key: Value）
+                            if (!string.IsNullOrWhiteSpace(resolvedNode.HttpHeaders))
+                            {
+                                foreach (var line in resolvedNode.HttpHeaders.Split('\n'))
+                                {
+                                    var t = line.Trim();
+                                    int colon = t.IndexOf(':');
+                                    if (colon > 0)
+                                    {
+                                        string hk = t[..colon].Trim();
+                                        string hv = t[(colon + 1)..].Trim();
+                                        if (hk.Length > 0) reqMsg.Headers.TryAddWithoutValidation(hk, hv);
+                                    }
+                                }
+                            }
+
+                            // 请求体
+                            if (!string.IsNullOrEmpty(resolvedNode.HttpBody) && method != System.Net.Http.HttpMethod.Get)
+                                reqMsg.Content = new System.Net.Http.StringContent(resolvedNode.HttpBody,
+                                    System.Text.Encoding.UTF8, "application/json");
+
+                            OnLog($"调用 HTTP {method} {url}");
+                            using var resp = await _httpClient.SendAsync(reqMsg, _cts.Token);
+                            string respBody = await resp.Content.ReadAsStringAsync(_cts.Token);
+                            OnLog($"HTTP 响应 {(int)resp.StatusCode}，内容长度 {respBody.Length}");
+                            if (!string.IsNullOrEmpty(resolvedNode.ResponseVarName))
+                                SetVariable(resolvedNode.ResponseVarName, respBody);
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex) { OnLog($"调用HTTP失败: {ex.Message}"); }
+                        break;
+                    }
 
                 default:
                     OnLog($"未知操作类型: {resolvedNode.ActionType}");
@@ -415,7 +628,36 @@ namespace WeChatAutomation.Core.Recording
 
         private async Task<bool> DoClickByUIAPathAsync(RecordedAction node)
         {
+            // 账号切换/窗口刚激活后，主界面可能尚未加载完成，UIA 树里还没有目标元素
+            // （如微信切换账号后主界面延迟出现）。定位失败时短暂重试等待界面就绪，
+            // 避免立即报"UIA 未找到"误判。
+            const int locateRetryTimeoutMs = 8000;
+            const int locateRetryIntervalMs = 400;
+
+            // 第一次尝试：正常输出诊断日志（段修剪/未找到等），便于排查
             var (found, hwnd, rect) = TryLocateElement(node);
+
+            // 失败则静默重试，等待目标元素出现
+            int retriedMs = 0;
+            while (!found && retriedMs < locateRetryTimeoutMs)
+            {
+                if (retriedMs == 0)
+                    OnLog($"界面可能未就绪，等待重试定位（最多 {locateRetryTimeoutMs / 1000}s）...");
+                // 未激活的窗口 UIA 树可能不完整，重试前确保窗口在前台
+                if (hwnd != IntPtr.Zero) EnsureWindowForeground(hwnd);
+
+                int delay = Math.Min(locateRetryIntervalMs, locateRetryTimeoutMs - retriedMs);
+                try { await Task.Delay(delay, _cts.Token); }
+                catch (OperationCanceledException) { return false; }
+                retriedMs += delay;
+
+                // 重试期间静默诊断日志，避免段修剪信息刷屏
+                _mutedLocateLog = true;
+                try { (found, hwnd, rect) = TryLocateElement(node); }
+                finally { _mutedLocateLog = false; }
+            }
+            if (found && retriedMs > 0)
+                OnLog($"重试定位成功（等待约 {retriedMs}ms 后元素出现）");
 
             if (found && !rect.IsEmpty && rect.Width > 0 && rect.Height > 0)
             {
@@ -450,11 +692,22 @@ namespace WeChatAutomation.Core.Recording
 
         private async Task<bool> DoClickByVisionAsync(RecordedAction node)
         {
-            // 按脚本绑定的模型加载（_currentVisionModel），失败则中止该步
-            if (!EnsureVisionModel(_currentVisionModel))
+            // 模板匹配模式：每个视觉步骤绑定自己的模板图片，按需加载
+            string templatePath = node.TemplateImage;
+            if (string.IsNullOrEmpty(templatePath) || !File.Exists(templatePath))
             {
-                OnLog("视觉模式失败: 模型未就绪");
+                OnLog($"视觉模式失败: 模板图片不存在 {(string.IsNullOrEmpty(templatePath) ? "(未设置)" : templatePath)}");
                 return false;
+            }
+
+            // 加载该步骤的模板（与已加载不同时重新加载）
+            if (!IsVisionReady || !string.Equals(_visionDetector?.TemplatePath, templatePath, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!InitVisionDetector(templatePath))
+                {
+                    OnLog("视觉模式失败: 模板加载失败");
+                    return false;
+                }
             }
 
             IntPtr hwnd = FindTargetWindow(node.WindowTitle);
@@ -475,18 +728,18 @@ namespace WeChatAutomation.Core.Recording
                 return false;
             }
 
-            string label = node.VisionLabel ?? "button";
-            float confThreshold = node.VisionConfThreshold > 0 ? node.VisionConfThreshold : 0.3f;
+            string label = node.VisionLabel ?? "template";
+            // 模板匹配阈值默认 0.7（原 YOLO 的 0.3 不适用于归一化互相关）
+            float confThreshold = node.VisionConfThreshold > 0 ? node.VisionConfThreshold : 0.7f;
 
-            // 同一窗口常有多个同类按钮（如多个 send_button）。优先点离录制坐标最近的检测，
-            // 避免点错。node.X/Y 是录制时的屏幕坐标，转成窗口局部坐标后参与择近。
+            // 同一窗口常有多个相似元素。优先点离录制坐标最近的匹配，避免点错。
+            // node.X/Y 是录制时的屏幕坐标，转成窗口局部坐标后参与择近。
             Detection detection;
             bool hasRef = node.X > 0 || node.Y > 0;
             if (hasRef)
             {
                 int localRefX = (int)(node.X - winX);
                 int localRefY = (int)(node.Y - winY);
-                // 容差取窗口较短边的 45%：既能命中目标按钮，又能在该范围内唯一确定
                 int tolerance = (int)(Math.Min(winW, winH) * 0.45);
                 detection = _visionDetector.FindNearest(screenshot, label, localRefX, localRefY, tolerance, confThreshold);
             }
@@ -495,35 +748,16 @@ namespace WeChatAutomation.Core.Recording
                 detection = _visionDetector.FindBest(screenshot, label, confThreshold);
             }
 
-            // 特定标签检测失败时，尝试降级到更通用的 "button" 标签
-            if (detection == null && label != "button")
-            {
-                OnLog($"视觉模式: '{label}' 未检测到，尝试降级到 'button'");
-                if (hasRef)
-                {
-                    int localRefX = (int)(node.X - winX);
-                    int localRefY = (int)(node.Y - winY);
-                    int tolerance = (int)(Math.Min(winW, winH) * 0.45);
-                    detection = _visionDetector.FindNearest(screenshot, "button", localRefX, localRefY, tolerance, confThreshold);
-                }
-                else
-                {
-                    detection = _visionDetector.FindBest(screenshot, "button", confThreshold);
-                }
-                if (detection != null)
-                    OnLog($"视觉模式降级检测成功: button ({detection.Confidence:P0})");
-            }
-
             if (detection == null)
             {
-                OnLog($"视觉模式失败: 未检测到 \"{label}\" (置信度阈值: {confThreshold})");
+                OnLog($"视觉模式失败: 未匹配到模板 \"{label}\" (匹配度阈值: {confThreshold})");
                 return false;
             }
 
             // 捕获视觉检测结果，供回传到服务器
             try
             {
-                var allDetections = _visionDetector.Detect(screenshot, new[] { label }, confThreshold);
+                var allDetections = _visionDetector.Detect(screenshot, null, confThreshold);
                 _visionResults.Add(new VisionDetectionResult
                 {
                     WindowTitle = node.WindowTitle ?? "",
@@ -546,7 +780,7 @@ namespace WeChatAutomation.Core.Recording
             int screenX = detection.CenterX + winX;
             int screenY = detection.CenterY + winY;
 
-            OnLog($"视觉点击: {detection.Label} ({detection.Confidence:P0}) @ 屏幕({screenX},{screenY}) 框({detection.X},{detection.Y} {detection.Width}x{detection.Height})" +
+            OnLog($"视觉点击: {detection.Label} (匹配度:{detection.Confidence:P0}) @ 屏幕({screenX},{screenY}) 框({detection.X},{detection.Y} {detection.Width}x{detection.Height})" +
                   (hasRef ? $" (按录制坐标择近)" : ""));
             await _simulator.ClickAsync(screenX, screenY);
             return true;
@@ -637,8 +871,15 @@ namespace WeChatAutomation.Core.Recording
                     }
                 }
 
+                // 判断录制的 ClassName 是否为窗口根元素的 ClassName。
+                // 若相等（如 Qt 应用内部容器复用窗口类名 Qt51514QWindowIcon），
+                // 则纯 ClassName 策略无法区分控件，应跳过，避免匹配到任意内部容器。
+                bool classNameIsWindowRoot = !string.IsNullOrEmpty(node.ClassName)
+                    && !string.IsNullOrEmpty(root.ClassName)
+                    && string.Equals(node.ClassName, root.ClassName, StringComparison.Ordinal);
+
                 // 策略4: ClassName + ControlType
-                if (element == null && !string.IsNullOrEmpty(node.ClassName))
+                if (element == null && !string.IsNullOrEmpty(node.ClassName) && !classNameIsWindowRoot)
                 {
                     try
                     {
@@ -651,13 +892,79 @@ namespace WeChatAutomation.Core.Recording
                         }
                         else
                         {
-                            element = root.FindFirstDescendant(_cf.ByClassName(node.ClassName));
-                            if (element != null) matchMethod = $"ClassName={node.ClassName}";
+                            // ControlType 无法解析时，纯 ClassName 查找过于宽松，跳过
+                            _logger.Warn("Player", $"跳过纯 ClassName 策略: ControlType=\"{node.ControlType}\" 无法解析");
                         }
                     }
                     catch (Exception ex)
                     {
                         _logger.Warn("Player", $"ClassName 查找异常: {ex.Message}");
+                    }
+                }
+
+                // 策略5: 非交互式 ControlType 提升回退
+                // 如果录制的 ControlType 是非交互式（Text、Image、Pane、Group），
+                // 尝试用交互式父类型 + 同名 Name 查找
+                if (element == null && !string.IsNullOrEmpty(node.ElementName) && !string.IsNullOrEmpty(node.ControlType))
+                {
+                    try
+                    {
+                        var promotedType = PromoteControlType(node.ControlType);
+                        if (promotedType != null)
+                        {
+                            var allMatches = root.FindAllDescendants(
+                                _cf.ByName(node.ElementName).And(_cf.ByControlType(promotedType.Value)));
+                            if (allMatches.Length > 0)
+                            {
+                                int idx = Math.Min(node.SiblingIndex, allMatches.Length - 1);
+                                element = allMatches[idx];
+                                matchMethod = $"Name={node.ElementName}+PromotedControlType={promotedType}[{idx}]";
+                                OnLog($"非交互式类型提升: {node.ControlType} -> {promotedType} + Name={node.ElementName}");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warn("Player", $"ControlType 提升查找异常: {ex.Message}");
+                    }
+                }
+
+                // 策略6: ClassName + 提升后 ControlType
+                if (element == null && !string.IsNullOrEmpty(node.ClassName) && !string.IsNullOrEmpty(node.ControlType) && !classNameIsWindowRoot)
+                {
+                    try
+                    {
+                        var promotedType = PromoteControlType(node.ControlType);
+                        if (promotedType != null)
+                        {
+                            element = root.FindFirstDescendant(
+                                _cf.ByClassName(node.ClassName).And(_cf.ByControlType(promotedType.Value)));
+                            if (element != null)
+                                matchMethod = $"ClassName={node.ClassName}+PromotedControlType={promotedType}";
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warn("Player", $"ClassName+提升ControlType 查找异常: {ex.Message}");
+                    }
+                }
+
+                // 策略7: 窗口级目标回退
+                // 若录制的目标是窗口本身（Qt/Electron 应用 UIA 树暴露差，FromPoint 常返回窗口元素），
+                // 且所有后代查找均失败，直接返回窗口根元素，由 DoClickByUIAPathAsync 使用录制坐标点击。
+                if (element == null)
+                {
+                    bool targetIsWindow =
+                        string.Equals(node.ControlType, "Window", StringComparison.OrdinalIgnoreCase)
+                        || (!string.IsNullOrEmpty(node.WindowTitle)
+                            && !string.IsNullOrEmpty(node.ElementName)
+                            && string.Equals(node.ElementName, node.WindowTitle, StringComparison.Ordinal))
+                        || classNameIsWindowRoot;
+                    if (targetIsWindow)
+                    {
+                        element = root;
+                        matchMethod = "WindowRoot(窗口级目标)";
+                        OnLog($"窗口级目标回退: 录制目标为窗口本身，使用窗口根元素 + 录制坐标({node.X:F0},{node.Y:F0})");
                     }
                 }
 
@@ -703,19 +1010,56 @@ namespace WeChatAutomation.Core.Recording
                 var firstSeg = segments[0];
                 if (MatchesSegment(current, firstSeg))
                 {
-                    // 根匹配，从第二级开始逐级查找
-                    for (int i = 1; i < segments.Count; i++)
+                    // 根匹配，从第二级开始逐级查找（支持段修剪）
+                    var result = FindByPathWithPruning(current, segments, 1);
+                    if (result != null) return result;
+                }
+                else
+                {
+                    // 根不精确匹配，尝试模糊匹配根
+                    if (FuzzyMatchesSegment(current, firstSeg, out var score) && score.TotalScore > 20)
                     {
-                        var child = FindDescendantBySegment(current, segments[i]);
-                        if (child == null) return null;
-                        current = child;
+                        var result = FindByPathWithPruning(current, segments, 1);
+                        if (result != null) return result;
                     }
-                    return current;
                 }
             }
 
             // // 开头或根不匹配：在任意深度查找匹配段序列的元素
-            return FindByXPathDeep(root, segments);
+            var deepResult = FindByXPathDeep(root, segments);
+            if (deepResult != null) return deepResult;
+
+            // 所有路径匹配策略失败，尝试叶子回退：
+            // 如果最后一段是非交互式类型（Text、Image、Pane、Group），
+            // 尝试匹配倒数第二段（交互式父元素）并返回它
+            if (segments.Count >= 2)
+            {
+                var leafSeg = segments[^1];
+                var nonInteractiveTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "Text", "Image", "Pane", "Group", "Header", "HeaderItem", "Separator"
+                };
+
+                // 判断叶子段是否缺少可靠标识：无 Name 且无 AutomationId（仅靠 ControlType/ClassName）
+                // 这种叶子（如 Button[@ClassName='mmui::XImage'] 图标子元素）定位不稳定，应回退到父段
+                bool leafLacksReliableId = !leafSeg.HasReliableId();
+
+                if (nonInteractiveTypes.Contains(leafSeg.ControlType) || leafLacksReliableId)
+                {
+                    string reason = nonInteractiveTypes.Contains(leafSeg.ControlType)
+                        ? "是非交互式"
+                        : "缺少可靠标识(无Name/AutoId)";
+                    OnLog($"XPath 叶子回退: 最后一段 {leafSeg.ControlType} {reason}，尝试匹配父段");
+                    var parentResult = FindByXPathUpTo(root, segments, segments.Count - 1, isDeep);
+                    if (parentResult != null)
+                    {
+                        OnLog($"XPath 叶子回退成功: 返回 {parentResult.ControlType}[@Name='{parentResult.Name}']");
+                        return parentResult;
+                    }
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -727,21 +1071,46 @@ namespace WeChatAutomation.Core.Recording
 
             // 在所有后代中查找匹配第一段的元素
             var candidates = FindAllMatchingDescendants(root, segments[0]);
+            // 如果精确匹配无结果，尝试模糊匹配
+            if (candidates.Count == 0)
+            {
+                var fuzzyCandidates = FindAllMatchingDescendantsFuzzy(root, segments[0]);
+                candidates = fuzzyCandidates.Select(c => c.elem).ToList();
+            }
+
             foreach (var candidate in candidates)
             {
                 if (segments.Count == 1) return candidate;
 
-                // 递归匹配后续段
-                var result = FindByPathFromParent(candidate, segments, 1);
+                // 递归匹配后续段（支持段修剪）
+                var result = FindByPathWithPruning(candidate, segments, 1);
                 if (result != null) return result;
             }
             return null;
         }
 
         /// <summary>
-        /// 从指定父元素开始，按 XPath 段逐级查找（允许跳过中间容器）
+        /// 从指定父元素开始，按 XPath 段逐级查找。
+        /// 支持段修剪：当某个段匹配失败时，跳过该段继续尝试后续段。
+        /// 最多允许跳过 MaxSkippableSegments 个段。
         /// </summary>
-        private AutomationElement FindByPathFromParent(AutomationElement parent, List<XPathSegment> segments, int startIndex)
+        private const int MaxSkippableSegments = 3;
+
+        private AutomationElement FindByPathWithPruning(AutomationElement parent, List<XPathSegment> segments, int startIndex)
+        {
+            // 先尝试严格路径匹配（不跳过任何段）
+            var strictResult = FindByPathStrict(parent, segments, startIndex);
+            if (strictResult != null) return strictResult;
+
+            // 严格匹配失败，尝试修剪（跳过中间段）
+            OnLog($"XPath 严格匹配失败，尝试段修剪（最多跳过 {MaxSkippableSegments} 段）");
+            return FindByPathWithSkip(parent, segments, startIndex, 0);
+        }
+
+        /// <summary>
+        /// 严格路径匹配：不跳过任何段
+        /// </summary>
+        private AutomationElement FindByPathStrict(AutomationElement parent, List<XPathSegment> segments, int startIndex)
         {
             AutomationElement current = parent;
             for (int i = startIndex; i < segments.Count; i++)
@@ -754,6 +1123,62 @@ namespace WeChatAutomation.Core.Recording
         }
 
         /// <summary>
+        /// 带段跳过的路径匹配。
+        /// skipped: 已跳过的段数
+        /// </summary>
+        private AutomationElement FindByPathWithSkip(AutomationElement parent, List<XPathSegment> segments, int startIndex, int skipped)
+        {
+            if (startIndex >= segments.Count) return parent; // 所有段已处理
+            if (skipped > MaxSkippableSegments) return null; // 跳过太多段
+
+            // 尝试匹配当前段
+            var child = FindDescendantBySegment(parent, segments[startIndex]);
+            if (child != null)
+            {
+                // 当前段匹配成功，继续匹配后续段
+                var result = FindByPathWithSkip(child, segments, startIndex + 1, skipped);
+                if (result != null) return result;
+            }
+
+            // 当前段匹配失败（或后续段失败），尝试跳过当前段
+            // 限制：不跳过最后一段（叶子段必须匹配）；不跳过带可靠标识（Name/AutomationId）的段，
+            // 这些是定位锚点，跳过会匹配到错误元素。只允许跳过无标识的中间容器段。
+            if (startIndex + 1 < segments.Count && !segments[startIndex].HasReliableId())
+            {
+                string segName = segments[startIndex].Attributes.TryGetValue("Name", out var n) ? n : "";
+                OnLog($"XPath 段修剪: 跳过段 {segments[startIndex].ControlType}[@Name='{segName}']");
+                var skipResult = FindByPathWithSkip(parent, segments, startIndex + 1, skipped + 1);
+                if (skipResult != null) return skipResult;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 查找 XPath 路径中到指定深度为止的元素（忽略后续段）。
+        /// 用于叶子回退：当最后一段是非交互式类型时，只匹配到倒数第二段。
+        /// </summary>
+        private AutomationElement FindByXPathUpTo(AutomationElement root, List<XPathSegment> segments, int upToIndex, bool isDeep)
+        {
+            if (upToIndex <= 0 || upToIndex > segments.Count) return null;
+
+            var truncatedSegments = segments.Take(upToIndex).ToList();
+
+            AutomationElement current = root;
+            if (!isDeep && truncatedSegments.Count > 0)
+            {
+                if (MatchesSegment(current, truncatedSegments[0]) ||
+                    (FuzzyMatchesSegment(current, truncatedSegments[0], out var s) && s.TotalScore > 20))
+                {
+                    var result = FindByPathWithPruning(current, truncatedSegments, 1);
+                    if (result != null) return result;
+                }
+            }
+
+            return FindByXPathDeep(root, truncatedSegments);
+        }
+
+        /// <summary>
         /// 在后代元素中查找匹配指定段的元素（先查直接子元素，再查更深层后代）。
         /// 这比仅查直接子元素更健壮，因为 UI 树中常有中间容器元素。
         /// </summary>
@@ -761,35 +1186,116 @@ namespace WeChatAutomation.Core.Recording
         {
             try
             {
-                // 1. 先在直接子元素中查找（最精确，遵循 XPath 路径）
+                // 索引可靠性判断：仅当段无 AutomationId 且无 Name（纯靠 ControlType/ClassName 标识）时，
+                // 兄弟索引才用于消歧。带 AutomationId 或 Name 的段，索引跨账号/跨次启动不可靠（兄弟顺序变化），
+                // 应优先按属性匹配，忽略索引。
+                bool useIndex = segment.Index > 0 && ShouldUseIndex(segment);
+
+                // 1. 先在直接子元素中精确查找（最精确，遵循 XPath 路径）
                 var children = parent.FindAllChildren();
-                var matches = new List<AutomationElement>();
+                var exactMatches = new List<AutomationElement>();
 
                 foreach (var child in children)
                 {
                     if (MatchesSegment(child, segment))
-                        matches.Add(child);
+                        exactMatches.Add(child);
                 }
 
-                if (matches.Count > 0)
+                if (exactMatches.Count > 0)
                 {
-                    int idx = segment.Index > 0 ? Math.Min(segment.Index - 1, matches.Count - 1) : 0;
-                    return matches[idx];
+                    if (useIndex && exactMatches.Count > 1)
+                    {
+                        int idx = Math.Min(segment.Index - 1, exactMatches.Count - 1);
+                        return exactMatches[idx];
+                    }
+                    // 无索引或仅一个匹配，取首个（属性已足够定位）
+                    return exactMatches[0];
                 }
 
-                // 2. 直接子元素未找到，在更深层后代中查找（跳过中间容器）
-                // 使用 FlaUI 的 FindAllDescendants + 属性条件提高效率
+                // 2. 直接子元素精确匹配失败，尝试子元素模糊匹配
+                var fuzzyCandidates = new List<(AutomationElement elem, MatchScore score)>();
+                foreach (var child in children)
+                {
+                    if (FuzzyMatchesSegment(child, segment, out var score))
+                        fuzzyCandidates.Add((child, score));
+                }
+
+                if (fuzzyCandidates.Count > 0)
+                {
+                    fuzzyCandidates.Sort((a, b) => b.score.TotalScore.CompareTo(a.score.TotalScore));
+                    AutomationElement best;
+                    if (useIndex && fuzzyCandidates.Count > 1)
+                    {
+                        int idx = Math.Min(segment.Index - 1, fuzzyCandidates.Count - 1);
+                        best = fuzzyCandidates[idx].elem;
+                    }
+                    else
+                    {
+                        best = fuzzyCandidates[0].elem;
+                    }
+                    string segName = segment.Attributes.TryGetValue("Name", out var n) ? n : "";
+                    OnLog($"XPath 模糊匹配: {segment.ControlType}[@Name='{segName}'] -> " +
+                          $"{best.ControlType}[@Name='{best.Name}'] 评分={fuzzyCandidates[0].score.TotalScore}");
+                    return best;
+                }
+
+                // 3. 在更深层后代中精确查找（跳过中间容器）
                 var descendantMatches = FindAllMatchingDescendants(parent, segment);
                 if (descendantMatches.Count > 0)
                 {
-                    int idx = segment.Index > 0 ? Math.Min(segment.Index - 1, descendantMatches.Count - 1) : 0;
-                    OnLog($"XPath: 在后代中找到 {descendantMatches.Count} 个匹配（跳过中间容器）");
-                    return descendantMatches[idx];
+                    AutomationElement pick;
+                    if (useIndex && descendantMatches.Count > 1)
+                    {
+                        int idx = Math.Min(segment.Index - 1, descendantMatches.Count - 1);
+                        OnLog($"XPath: 在后代中找到 {descendantMatches.Count} 个匹配（跳过中间容器）[{idx}]");
+                        pick = descendantMatches[idx];
+                    }
+                    else
+                    {
+                        OnLog($"XPath: 在后代中找到 {descendantMatches.Count} 个匹配（跳过中间容器）");
+                        pick = descendantMatches[0];
+                    }
+                    return pick;
+                }
+
+                // 4. 在更深层后代中模糊查找
+                var fuzzyDescendants = FindAllMatchingDescendantsFuzzy(parent, segment);
+                if (fuzzyDescendants.Count > 0)
+                {
+                    fuzzyDescendants.Sort((a, b) => b.score.TotalScore.CompareTo(a.score.TotalScore));
+                    AutomationElement best;
+                    if (useIndex && fuzzyDescendants.Count > 1)
+                    {
+                        int idx = Math.Min(segment.Index - 1, fuzzyDescendants.Count - 1);
+                        best = fuzzyDescendants[idx].elem;
+                    }
+                    else
+                    {
+                        best = fuzzyDescendants[0].elem;
+                    }
+                    OnLog($"XPath 后代模糊匹配: {segment.ControlType} -> {best.ControlType}[@Name='{best.Name}'] 评分={fuzzyDescendants[0].score.TotalScore}");
+                    return best;
                 }
 
                 return null;
             }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// 判断 XPath 段是否应使用兄弟索引消歧。
+        /// 仅当段无 AutomationId 且无 Name（纯靠 ControlType/ClassName 标识）时索引才有意义；
+        /// 带 AutomationId 或 Name 的段，索引跨账号不可靠，应忽略。
+        /// </summary>
+        private static bool ShouldUseIndex(XPathSegment segment)
+        {
+            if (segment.Attributes == null || segment.Attributes.Count == 0) return true;
+            foreach (var key in segment.Attributes.Keys)
+            {
+                string k = key.ToLower();
+                if (k == "automationid" || k == "name") return false;
+            }
+            return true;
         }
 
         /// <summary>
@@ -842,6 +1348,41 @@ namespace WeChatAutomation.Core.Recording
         }
 
         /// <summary>
+        /// 在所有后代中模糊查找匹配指定段的元素，返回带评分的候选列表
+        /// </summary>
+        private List<(AutomationElement elem, MatchScore score)> FindAllMatchingDescendantsFuzzy(
+            AutomationElement root, XPathSegment segment)
+        {
+            var results = new List<(AutomationElement elem, MatchScore score)>();
+            try
+            {
+                var controlType = ParseControlType(segment.ControlType);
+                if (controlType != null)
+                {
+                    // 使用 FlaUI 的 ControlType 条件缩小搜索范围
+                    var found = root.FindAllDescendants(_cf.ByControlType(controlType.Value));
+                    foreach (var elem in found)
+                    {
+                        if (FuzzyMatchesSegment(elem, segment, out var score))
+                            results.Add((elem, score));
+                    }
+                }
+                else
+                {
+                    // 无法解析 ControlType，遍历所有后代
+                    var descendants = root.FindAllDescendants();
+                    foreach (var desc in descendants)
+                    {
+                        if (FuzzyMatchesSegment(desc, segment, out var score))
+                            results.Add((desc, score));
+                    }
+                }
+            }
+            catch { }
+            return results;
+        }
+
+        /// <summary>
         /// 检查元素是否匹配 XPath 段
         /// </summary>
         private bool MatchesSegment(AutomationElement element, XPathSegment segment)
@@ -886,6 +1427,112 @@ namespace WeChatAutomation.Core.Recording
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// 模糊比较属性值，用于评分式匹配。
+        /// 返回匹配级别：0=不匹配, 1=精确, 2=大小写不敏感, 3=包含匹配
+        /// </summary>
+        private static int TryGetPropertyValueFuzzy(string actualValue, string expectedValue)
+        {
+            try
+            {
+                if (actualValue == expectedValue) return 1;
+                if (string.Equals(actualValue, expectedValue, StringComparison.OrdinalIgnoreCase)) return 2;
+                if (!string.IsNullOrEmpty(actualValue) && !string.IsNullOrEmpty(expectedValue))
+                {
+                    if (actualValue.Contains(expectedValue, StringComparison.OrdinalIgnoreCase)) return 3;
+                    if (expectedValue.Contains(actualValue, StringComparison.OrdinalIgnoreCase)) return 3;
+                }
+                return 0;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>
+        /// XPath 段匹配评分结果
+        /// </summary>
+        private struct MatchScore
+        {
+            public int TotalScore;
+            public bool ControlTypeMatched;
+            public bool AutomationIdExact;
+            public bool NameExact;
+            public bool NamePartial;
+            public bool ClassNameExact;
+            public bool ClassNamePartial;
+        }
+
+        /// <summary>
+        /// 计算元素与 XPath 段的匹配评分。
+        /// ControlType 必须匹配（硬性要求），其他属性按可靠性加权。
+        /// </summary>
+        private MatchScore ComputeMatchScore(AutomationElement element, XPathSegment segment)
+        {
+            var score = new MatchScore();
+            try
+            {
+                // ControlType 是硬性要求
+                string ctName = element.ControlType.ToString();
+                if (!string.Equals(ctName, segment.ControlType, StringComparison.OrdinalIgnoreCase))
+                    return score; // ControlType 不匹配，评分=0
+
+                score.ControlTypeMatched = true;
+                score.TotalScore = 10; // ControlType 匹配基础分
+
+                if (segment.Attributes.Count == 0) return score;
+
+                foreach (var attr in segment.Attributes)
+                {
+                    string key = attr.Key.ToLower();
+                    string expected = attr.Value;
+
+                    switch (key)
+                    {
+                        case "automationid":
+                            {
+                                string actual = element.AutomationId ?? "";
+                                int level = TryGetPropertyValueFuzzy(actual, expected);
+                                if (level == 1) { score.AutomationIdExact = true; score.TotalScore += 50; }
+                                else if (level == 2) { score.TotalScore += 40; }
+                                break;
+                            }
+                        case "name":
+                            {
+                                string actual = element.Name ?? "";
+                                int level = TryGetPropertyValueFuzzy(actual, expected);
+                                if (level == 1) { score.NameExact = true; score.TotalScore += 30; }
+                                else if (level == 2) { score.NamePartial = true; score.TotalScore += 20; }
+                                else if (level == 3) { score.NamePartial = true; score.TotalScore += 10; }
+                                break;
+                            }
+                        case "classname":
+                            {
+                                string actual = element.ClassName ?? "";
+                                int level = TryGetPropertyValueFuzzy(actual, expected);
+                                if (level == 1) { score.ClassNameExact = true; score.TotalScore += 15; }
+                                else if (level == 2) { score.ClassNamePartial = true; score.TotalScore += 10; }
+                                else if (level == 3) { score.ClassNamePartial = true; score.TotalScore += 5; }
+                                break;
+                            }
+                    }
+                }
+            }
+            catch { }
+
+            return score;
+        }
+
+        /// <summary>
+        /// 模糊匹配：计算评分，返回是否达到最低匹配阈值。
+        /// 最低阈值：ControlType 匹配 + 至少一个属性精确匹配，或 ControlType + 多个属性部分匹配。
+        /// </summary>
+        private bool FuzzyMatchesSegment(AutomationElement element, XPathSegment segment, out MatchScore score)
+        {
+            score = ComputeMatchScore(element, segment);
+            if (!score.ControlTypeMatched) return false;
+            // 最低阈值：ControlType 匹配（10分）+ 至少一个属性贡献额外分数
+            return score.TotalScore > 10;
         }
 
         /// <summary>
@@ -949,6 +1596,21 @@ namespace WeChatAutomation.Core.Recording
             public string ControlType { get; set; } = "";
             public Dictionary<string, string> Attributes { get; set; } = new();
             public int Index { get; set; } // 0 = 无索引, 1+ = 1-based
+
+            /// <summary>
+            /// 是否有可靠标识（AutomationId 或 Name）。
+            /// 缺少这两者的段（仅靠 ControlType/ClassName）定位不稳定。
+            /// </summary>
+            public bool HasReliableId()
+            {
+                if (Attributes == null || Attributes.Count == 0) return false;
+                foreach (var key in Attributes.Keys)
+                {
+                    string k = key.ToLower();
+                    if (k == "automationid" || k == "name") return true;
+                }
+                return false;
+            }
         }
 
         /// <summary>
@@ -1002,7 +1664,23 @@ namespace WeChatAutomation.Core.Recording
         }
 
         /// <summary>
-        /// 根据窗口标题查找窗口句柄
+        /// 将非交互式 ControlType 提升为交互式 ControlType。
+        /// 例如：Text -> Button, Image -> Button, Group -> Button
+        /// 用于回退策略：当录制的元素是非交互式子元素时，尝试查找其交互式父元素。
+        /// </summary>
+        private static FlaUI.Core.Definitions.ControlType? PromoteControlType(string controlType)
+        {
+            if (string.IsNullOrEmpty(controlType)) return null;
+
+            return controlType.ToLower() switch
+            {
+                "text" => FlaUI.Core.Definitions.ControlType.Button,
+                "image" => FlaUI.Core.Definitions.ControlType.Button,
+                "group" => FlaUI.Core.Definitions.ControlType.Button,
+                "pane" => null, // Pane 太泛化，不提升
+                _ => null
+            };
+        }
         /// </summary>
         private IntPtr FindTargetWindow(string? windowTitle)
         {
@@ -2021,6 +2699,7 @@ namespace WeChatAutomation.Core.Recording
                 Order = node.Order,
                 ActionType = node.ActionType,
                 Name = ResolveStr(node.Name),
+                DisplayName = node.DisplayName,
                 ClassName = ResolveStr(node.ClassName),
                 ElementName = ResolveStr(node.ElementName),
                 AutomationId = ResolveStr(node.AutomationId),
@@ -2031,6 +2710,7 @@ namespace WeChatAutomation.Core.Recording
                 ClickMode = node.ClickMode,
                 VisionLabel = ResolveStr(node.VisionLabel),
                 VisionConfThreshold = node.VisionConfThreshold,
+                TemplateImage = node.TemplateImage,   // 模板路径不做变量替换
                 Parameter = ResolveStr(node.Parameter),
                 DelayMs = node.DelayMs,
                 ScrollAmount = node.ScrollAmount,
@@ -2050,13 +2730,28 @@ namespace WeChatAutomation.Core.Recording
                 CreatedAt = node.CreatedAt,
                 XPath = ResolveStr(node.XPath),
                 SiblingIndex = node.SiblingIndex,
-                RuntimeId = node.RuntimeId
+                RuntimeId = node.RuntimeId,
+                TrueActions = node.TrueActions?.Select(ResolveVariables).ToList(),
+                FalseActions = node.FalseActions?.Select(ResolveVariables).ToList(),
+                TrueBranch = node.TrueBranch,
+                TrueBranchScript = ResolveStr(node.TrueBranchScript),
+                FalseBranch = node.FalseBranch,
+                FalseBranchScript = ResolveStr(node.FalseBranchScript),
+                MaxLoopCount = node.MaxLoopCount,
+                LoopCount = node.LoopCount,
+                WaitKey = node.WaitKey,
+                WaitTimeoutMs = node.WaitTimeoutMs,
+                HttpUrl = ResolveStr(node.HttpUrl),
+                HttpMethod = node.HttpMethod,
+                HttpHeaders = ResolveStr(node.HttpHeaders),
+                HttpBody = ResolveStr(node.HttpBody),
+                ResponseVarName = node.ResponseVarName
             };
             return resolved;
         }
 
         public void Stop() => _cts?.Cancel();
-        private void OnLog(string msg) { _logger.Info("Player", msg); LogMessage?.Invoke(this, msg); }
+        private void OnLog(string msg) { if (_mutedLocateLog) return; _logger.Info("Player", msg); LogMessage?.Invoke(this, msg); }
         public void Dispose() { _cts?.Cancel(); _cts?.Dispose(); _visionDetector?.Dispose(); }
     }
 

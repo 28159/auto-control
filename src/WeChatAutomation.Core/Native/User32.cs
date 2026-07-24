@@ -329,6 +329,7 @@ namespace WeChatAutomation.Core.Native
             public IntPtr dwExtraInfo;
         }
 
+        public const byte VK_F8 = 0x77;
         public const byte VK_F9 = 0x78;
         public const byte VK_F10 = 0x79;
         public const byte VK_F11 = 0x7A;

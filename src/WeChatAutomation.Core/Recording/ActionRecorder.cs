@@ -368,6 +368,7 @@ namespace WeChatAutomation.Core.Recording
                 DelayMs = delay,
                 ClickMode = CurrentClickMode,
                 VisionLabel = CurrentClickMode == ClickMode.Vision ? visionLabel : null,
+                TemplateImage = CurrentClickMode == ClickMode.Vision ? SaveVisionTemplate(info, visionLabel) : null,
                 XPath = info.XPath,
                 SiblingIndex = info.SiblingIndex,
                 RuntimeId = info.RuntimeId
@@ -415,6 +416,34 @@ namespace WeChatAutomation.Core.Recording
             NodeRecorded?.Invoke(this, node);
         }
 
+        /// <summary>
+        /// 在指定 nodeId 之后插入动作；若 nodeId 为 null 或找不到则追加到末尾。
+        /// </summary>
+        public void InsertAfter(string? afterNodeId, RecordedAction node)
+        {
+            if (_isRecording) FlushTextBuffer();
+
+            int idx = -1;
+            if (!string.IsNullOrEmpty(afterNodeId))
+            {
+                var target = _nodes.Find(n => n.NodeId == afterNodeId);
+                if (target != null) idx = _nodes.IndexOf(target);
+            }
+
+            if (idx < 0)
+            {
+                node.Order = _nodes.Count + 1;
+                _nodes.Add(node);
+            }
+            else
+            {
+                _nodes.Insert(idx + 1, node);
+                for (int i = 0; i < _nodes.Count; i++) _nodes[i].Order = i + 1;
+            }
+            OnLog($"手动添加 #{node.Order}: {node.Summary}");
+            NodeRecorded?.Invoke(this, node);
+        }
+
         // ── 节点操作 ──
 
         public bool RemoveNode(string nodeId)
@@ -451,6 +480,66 @@ namespace WeChatAutomation.Core.Recording
         }
 
         // ── 训练数据采集 ──
+
+        /// <summary>
+        /// 视觉模式：截取点击位置周围的窗口局部区域作为模板图片，保存到模板目录。
+        /// 返回模板文件绝对路径，供回放时模板匹配使用。
+        /// </summary>
+        private string SaveVisionTemplate(MouseClickInfo info, string label)
+        {
+            try
+            {
+                if (info.WindowHandle == IntPtr.Zero) return null;
+
+                IntPtr topLevelHwnd = User32.GetAncestor(info.WindowHandle, User32.GA_ROOT);
+                if (topLevelHwnd == IntPtr.Zero) topLevelHwnd = info.WindowHandle;
+
+                User32.GetWindowRect(topLevelHwnd, out RECT winRect);
+                if (winRect.Width <= 0 || winRect.Height <= 0) return null;
+
+                using var screenshot = WindowCapturer.CaptureWindow(topLevelHwnd);
+                if (screenshot == null) return null;
+
+                // 点击点在窗口局部坐标
+                int localX = info.X - winRect.Left;
+                int localY = info.Y - winRect.Top;
+
+                // 模板尺寸：基于元素类型估算，最小 32x32，不超过窗口
+                int w = EstimateElementWidth(info);
+                int h = EstimateElementHeight(info);
+                w = Math.Clamp(w, 32, winRect.Width);
+                h = Math.Clamp(h, 32, winRect.Height);
+
+                // 以点击点为中心截取，边界裁剪到窗口内
+                int tx = localX - w / 2;
+                int ty = localY - h / 2;
+                if (tx < 0) tx = 0;
+                if (ty < 0) ty = 0;
+                if (tx + w > screenshot.Width) w = screenshot.Width - tx;
+                if (ty + h > screenshot.Height) h = screenshot.Height - ty;
+                if (w < 16 || h < 16) return null;
+
+                using var template = new Bitmap(w, h, PixelFormat.Format24bppRgb);
+                using (var g = Graphics.FromImage(template))
+                {
+                    g.DrawImage(screenshot, new Rectangle(0, 0, w, h),
+                        new Rectangle(tx, ty, w, h), GraphicsUnit.Pixel);
+                }
+
+                Directory.CreateDirectory(AppPaths.TemplatesDir);
+                string fileName = $"{label ?? "tpl"}_{DateTime.Now:yyyyMMdd_HHmmss_fff}_{info.X}_{info.Y}.png";
+                string path = Path.Combine(AppPaths.TemplatesDir, fileName);
+                template.Save(path, ImageFormat.Png);
+
+                OnLog($"视觉模板已截取: {fileName} ({w}x{h})");
+                return path;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn("Recorder", $"视觉模板截取失败: {ex.Message}");
+                return null;
+            }
+        }
 
         private void SaveTrainingCapture(MouseClickInfo info)
         {

@@ -97,13 +97,12 @@ namespace WeChatAutomation.Core.Services
                 subPlayer.LogMessage += (s2, msg) => LogMessage?.Invoke(this, msg);
                 subPlayer.CurrentParameters = subParams;
 
-                if (actions.Any(a => a.ClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision))
-                    subPlayer.EnsureVisionModel(recordingFile.VisionModel);
+                // 模板匹配模式下每个视觉步骤自带模板，无需全局模型加载
 
                 // 复制主脚本的阅读目标到子脚本（若主脚本设置了 PickTargetWindow）
                 // 子脚本通常应自行指定窗口，这里不复制以保持隔离
 
-                subPlayer.Play(actions, recordingFile.VisionModel).GetAwaiter().GetResult();
+                subPlayer.Play(actions, null).GetAwaiter().GetResult();
 
                 // 合并子脚本的读取/视觉结果到主结果
                 foreach (var r in subPlayer.ReadResults) _player.AppendReadResult(r);
@@ -174,17 +173,13 @@ namespace WeChatAutomation.Core.Services
                     actions = ReplaceParameters(actions, parameters);
                 }
 
-                if (actions.Any(a => a.ClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision))
-                {
-                    // 使用脚本绑定的视觉模型（无头回放/HTTP/MCP 调用同样复用）
-                    _player.EnsureVisionModel(recordingFile.VisionModel);
-                }
+                // 模板匹配模式下每个视觉步骤自带模板，无需全局模型加载
 
                 // 设置当前参数供 If-TargetScript 子脚本继承
                 _player.CurrentParameters = parameters;
 
                 _currentCts = new CancellationTokenSource();
-                await _player.Play(actions, recordingFile.VisionModel);
+                await _player.Play(actions, null);
 
                 return new ExecuteResult
                 {
@@ -299,6 +294,7 @@ namespace WeChatAutomation.Core.Services
                     Order = action.Order,
                     ActionType = action.ActionType,
                     Name = action.Name,
+                    DisplayName = action.DisplayName,
                     ClassName = action.ClassName,
                     ElementName = action.ElementName,
                     AutomationId = action.AutomationId,
@@ -309,6 +305,7 @@ namespace WeChatAutomation.Core.Services
                     ClickMode = action.ClickMode,
                     VisionLabel = action.VisionLabel,
                     VisionConfThreshold = action.VisionConfThreshold,
+                    TemplateImage = action.TemplateImage,
                     XPath = action.XPath,
                     SiblingIndex = action.SiblingIndex,
                     RuntimeId = action.RuntimeId,
@@ -328,7 +325,23 @@ namespace WeChatAutomation.Core.Services
                     TargetScript = action.TargetScript,
                     SwitchAll = action.SwitchAll,
                     IsEnabled = action.IsEnabled,
-                    CreatedAt = action.CreatedAt
+                    CreatedAt = action.CreatedAt,
+                    Remark = action.Remark,
+                    TrueActions = action.TrueActions != null ? ReplaceParameters(action.TrueActions, parameters) : null,
+                    FalseActions = action.FalseActions != null ? ReplaceParameters(action.FalseActions, parameters) : null,
+                    TrueBranch = action.TrueBranch,
+                    TrueBranchScript = action.TrueBranchScript,
+                    FalseBranch = action.FalseBranch,
+                    FalseBranchScript = action.FalseBranchScript,
+                    MaxLoopCount = action.MaxLoopCount,
+                    LoopCount = action.LoopCount,
+                    WaitKey = action.WaitKey,
+                    WaitTimeoutMs = action.WaitTimeoutMs,
+                    HttpUrl = action.HttpUrl,
+                    HttpMethod = action.HttpMethod,
+                    HttpHeaders = action.HttpHeaders,
+                    HttpBody = action.HttpBody,
+                    ResponseVarName = action.ResponseVarName
                 };
 
                 foreach (var kvp in parameters)
@@ -338,6 +351,11 @@ namespace WeChatAutomation.Core.Services
                     newAction.WindowTitle = newAction.WindowTitle?.Replace($"{{{kvp.Key}}}", kvp.Value);
                     newAction.ConditionExpression = newAction.ConditionExpression?.Replace($"{{{kvp.Key}}}", kvp.Value);
                     newAction.TargetScript = newAction.TargetScript?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.TrueBranchScript = newAction.TrueBranchScript?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.FalseBranchScript = newAction.FalseBranchScript?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.HttpUrl = newAction.HttpUrl?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.HttpHeaders = newAction.HttpHeaders?.Replace($"{{{kvp.Key}}}", kvp.Value);
+                    newAction.HttpBody = newAction.HttpBody?.Replace($"{{{kvp.Key}}}", kvp.Value);
                 }
 
                 if (newAction.ActionType == ActionType.InputParam && newAction.CopyToClipboard)

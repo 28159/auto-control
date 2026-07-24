@@ -5,161 +5,182 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
-using Microsoft.ML.OnnxRuntime;
-using Microsoft.ML.OnnxRuntime.Tensors;
+using OpenCvSharp;
 using WeChatAutomation.Core.Logging;
 
 namespace WeChatAutomation.Core.Vision
 {
+    /// <summary>
+    /// 基于 OpenCV 模板匹配的视觉检测器。
+    /// 替代原 YOLO/ONNX 方案：录制时截取目标元素图片作为模板，回放时用 Cv2.MatchTemplate
+    /// 在窗口截图中定位最相似位置。无需训练，零外部依赖（仅 OpenCvSharp4）。
+    /// 保留 FindBest/FindNearest/Detect 方法签名，便于上层 ActionPlayer 最小改动。
+    /// </summary>
     public class VisionDetector : IDisposable
     {
         private static readonly Logger _logger = Logger.Instance;
-        private InferenceSession _session;
-        private string[] _labels;
-        private int _inputWidth = 640;
-        private int _inputHeight = 640;
+        private Mat _template;
+        private Mat _templateGray;
+        private int _templateWidth;
+        private int _templateHeight;
+        private string _templateLabel = "template";
         private bool _disposed;
 
-        public bool IsLoaded => _session != null;
-        public string ModelPath { get; private set; }
-        /// <summary>模型类别名（无 labels 文件时为内置 20 类）。</summary>
-        public IReadOnlyList<string> Labels => _labels;
-        /// <summary>模型输入尺寸。</summary>
-        public (int Width, int Height) InputSize => (_inputWidth, _inputHeight);
+        public bool IsLoaded => _template != null;
+        public string TemplatePath { get; private set; }
+
+        /// <summary>模板标签（用于日志和结果回传，不参与匹配逻辑）。</summary>
+        public string Label => _templateLabel;
+        /// <summary>模板尺寸。</summary>
+        public (int Width, int Height) InputSize => (_templateWidth, _templateHeight);
 
         public VisionDetector() { }
 
+        /// <summary>
+        /// 加载模板图片。兼容旧接口：modelPath 指向模板图片文件（png/bmp/jpg）。
+        /// labelsPath 忽略（模板匹配无需类别文件）。
+        /// </summary>
         public bool LoadModel(string modelPath, string labelsPath = null)
         {
             try
             {
                 if (!File.Exists(modelPath))
                 {
-                    _logger.Error("VisionDetector", $"模型文件不存在: {modelPath}");
+                    _logger.Error("VisionDetector", $"模板文件不存在: {modelPath}");
                     return false;
                 }
 
-                var sessionOptions = new SessionOptions();
-                sessionOptions.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
-
-                _session = new InferenceSession(modelPath, sessionOptions);
-                ModelPath = modelPath;
-
-                var inputMeta = _session.InputMetadata;
-                foreach (var kvp in inputMeta)
+                _template?.Dispose();
+                _templateGray?.Dispose();
+                _template = Cv2.ImRead(modelPath, ImreadModes.Color);
+                if (_template == null || _template.Empty())
                 {
-                    var shape = kvp.Value.Dimensions;
-                    if (shape.Length >= 3)
-                    {
-                        _inputHeight = shape[2] > 0 ? shape[2] : 640;
-                        _inputWidth = shape[3] > 0 ? shape[3] : 640;
-                    }
-                    break;
+                    _logger.Error("VisionDetector", $"模板图片读取失败: {modelPath}");
+                    _template = null;
+                    return false;
                 }
 
-                if (labelsPath != null && File.Exists(labelsPath))
-                {
-                    _labels = File.ReadAllLines(labelsPath)
-                        .Where(l => !string.IsNullOrWhiteSpace(l))
-                        .ToArray();
-                }
-                else
-                {
-                    var outputMeta = _session.OutputMetadata;
-                    foreach (var kvp in outputMeta)
-                    {
-                        var shape = kvp.Value.Dimensions;
-                        if (shape.Length >= 3)
-                        {
-                            int dim1 = shape[1] > 0 ? shape[1] : 0;
-                            int dim2 = shape[2] > 0 ? shape[2] : 0;
-                            bool transposed = dim1 < dim2;
-                            int numClasses = transposed ? dim1 - 4 : dim2 - 4;
-                            if (numClasses > 0)
-                            {
-                                _labels = Enumerable.Range(0, numClasses)
-                                    .Select(i => $"class_{i}")
-                                    .ToArray();
-                            }
-                        }
-                        break;
-                    }
+                _templateGray = new Mat();
+                Cv2.CvtColor(_template, _templateGray, ColorConversionCodes.BGR2GRAY);
+                _templateWidth = _template.Width;
+                _templateHeight = _template.Height;
+                TemplatePath = modelPath;
+                _templateLabel = Path.GetFileNameWithoutExtension(modelPath);
 
-                    if (_labels == null || _labels.Length == 0)
-                    {
-                        _labels = new[] { "button", "input", "checkbox", "radio", "dropdown",
-                            "tab", "menu_item", "icon", "link", "text_field",
-                            "search_box", "send_button", "close_button", "minimize_button",
-                            "maximize_button", "scrollbar", "slider", "toggle", "tooltip", "image" };
-                    }
-                }
-
-                _logger.Info("VisionDetector", $"模型加载成功: {modelPath}, 输入尺寸: {_inputWidth}x{_inputHeight}, 类别数: {_labels.Length}");
+                _logger.Info("VisionDetector", $"模板加载成功: {modelPath}, 尺寸: {_templateWidth}x{_templateHeight}");
                 return true;
             }
             catch (Exception ex)
             {
-                _logger.Error("VisionDetector", $"模型加载失败: {ex.Message}");
-                _session?.Dispose();
-                _session = null;
+                _logger.Error("VisionDetector", $"模板加载失败: {ex.Message}");
+                _template?.Dispose();
+                _templateGray?.Dispose();
+                _template = null;
+                _templateGray = null;
                 return false;
             }
         }
 
-        public List<Detection> Detect(Bitmap screenshot, string[] filterLabels = null, float confThreshold = 0.5f, float iouThreshold = 0.45f)
+        /// <summary>
+        /// 直接从 Bitmap 加载模板（录制时截取后内存加载，无需落盘再读）。
+        /// </summary>
+        public bool LoadTemplateFromBitmap(Bitmap bitmap, string label = "template")
         {
-            if (_session == null)
+            try
             {
-                _logger.Warn("VisionDetector", "模型未加载");
+                if (bitmap == null) return false;
+                _template?.Dispose();
+                _templateGray?.Dispose();
+                _template = BitmapToMat(bitmap);
+                _templateGray = new Mat();
+                Cv2.CvtColor(_template, _templateGray, ColorConversionCodes.BGR2GRAY);
+                _templateWidth = _template.Width;
+                _templateHeight = _template.Height;
+                _templateLabel = label;
+                TemplatePath = null;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.Error("VisionDetector", $"从 Bitmap 加载模板失败: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 在截图中匹配当前模板，返回所有超过阈值的位置。
+        /// filterLabels 在模板匹配中无实际作用（只有单一模板），仅保留以兼容签名。
+        /// confThreshold 解释为匹配度阈值（0~1，默认 0.7），iouThreshold 用于对多重叠命中做 NMS。
+        /// </summary>
+        public List<Detection> Detect(Bitmap screenshot, string[] filterLabels = null, float confThreshold = 0.7f, float iouThreshold = 0.45f)
+        {
+            if (_templateGray == null)
+            {
+                _logger.Warn("VisionDetector", "模板未加载");
                 return new List<Detection>();
             }
 
             try
             {
-                int origWidth = screenshot.Width;
-                int origHeight = screenshot.Height;
+                using var sceneGray = BitmapToGrayMat(screenshot);
+                if (sceneGray == null || sceneGray.Empty()) return new List<Detection>();
 
-                float scaleX = (float)origWidth / _inputWidth;
-                float scaleY = (float)origHeight / _inputHeight;
-
-                var tensor = Preprocess(screenshot);
-
-                var inputName = _session.InputMetadata.Keys.First();
-                var inputs = new List<NamedOnnxValue>
+                // 模板不能大于场景
+                if (_templateWidth > sceneGray.Width || _templateHeight > sceneGray.Height)
                 {
-                    NamedOnnxValue.CreateFromTensor(inputName, tensor)
-                };
-
-                using var results = _session.Run(inputs);
-                var outputTensor = results.First().AsTensor<float>();
-                var rawDetections = Postprocess(outputTensor, scaleX, scaleY, confThreshold);
-
-                var nmsResults = NMS(rawDetections, iouThreshold);
-
-                if (filterLabels != null && filterLabels.Length > 0)
-                {
-                    var labelSet = new HashSet<string>(filterLabels, StringComparer.OrdinalIgnoreCase);
-                    nmsResults = nmsResults.Where(d => labelSet.Contains(d.Label)).ToList();
+                    _logger.Warn("VisionDetector", $"模板({_templateWidth}x{_templateHeight})大于截图({sceneGray.Width}x{sceneGray.Height})");
+                    return new List<Detection>();
                 }
 
-                return nmsResults;
+                using var result = new Mat();
+                Cv2.MatchTemplate(sceneGray, _templateGray, result, TemplateMatchModes.CCoeffNormed);
+
+                // 收集所有超过阈值的位置：通过归一化结果矩阵逐点扫描
+                var rawDetections = new List<Detection>();
+                result.GetArray(out float[] matchVals);
+                int resW = result.Width;
+                int resH = result.Height;
+                float thr = Math.Clamp(confThreshold, 0f, 1f);
+                for (int y = 0; y < resH; y++)
+                {
+                    for (int x = 0; x < resW; x++)
+                    {
+                        float val = matchVals[y * resW + x];
+                        if (val >= thr)
+                        {
+                            rawDetections.Add(new Detection
+                            {
+                                Label = _templateLabel,
+                                Confidence = val,
+                                X = x,
+                                Y = y,
+                                Width = _templateWidth,
+                                Height = _templateHeight
+                            });
+                        }
+                    }
+                }
+
+                // 邻近点会形成大量重叠命中，用 NMS 合并
+                return NMS(rawDetections, iouThreshold);
             }
             catch (Exception ex)
             {
-                _logger.Error("VisionDetector", $"推理失败: {ex.Message}");
+                _logger.Error("VisionDetector", $"模板匹配失败: {ex.Message}");
                 return new List<Detection>();
             }
         }
 
-        public Detection FindBest(Bitmap screenshot, string label, float confThreshold = 0.5f)
+        /// <summary>匹配度最高的位置。</summary>
+        public Detection FindBest(Bitmap screenshot, string label, float confThreshold = 0.7f)
         {
-            var results = Detect(screenshot, new[] { label }, confThreshold);
+            var results = Detect(screenshot, null, confThreshold);
             return results.OrderByDescending(d => d.Confidence).FirstOrDefault();
         }
 
-        public Detection FindBestInRegion(Bitmap screenshot, string label, int regionX, int regionY, int regionW, int regionH, float confThreshold = 0.5f)
+        public Detection FindBestInRegion(Bitmap screenshot, string label, int regionX, int regionY, int regionW, int regionH, float confThreshold = 0.7f)
         {
-            var results = Detect(screenshot, new[] { label }, confThreshold);
+            var results = Detect(screenshot, null, confThreshold);
             return results
                 .Where(d => d.CenterX >= regionX && d.CenterX <= regionX + regionW
                          && d.CenterY >= regionY && d.CenterY <= regionY + regionH)
@@ -168,17 +189,16 @@ namespace WeChatAutomation.Core.Vision
         }
 
         /// <summary>
-        /// 在所有匹配 label 的检测里，优先返回中心点离参考点 (refX, refY)（窗口局部坐标）最近的那个；
-        /// 若没有任何检测落在 tolerance 半径内，回退到全局置信度最高的检测。
-        /// 用于视觉点击：同一窗口常有多个同类按钮，按录制坐标点准目标。
+        /// 在所有匹配位置里，优先返回中心点离参考点 (refX, refY)（窗口局部坐标）最近的那个；
+        /// 若没有任何匹配落在 tolerance 半径内，回退到全局匹配度最高的位置。
+        /// 用于视觉点击：同一窗口常有多个相似元素，按录制坐标点准目标。
         /// </summary>
         public Detection FindNearest(Bitmap screenshot, string label, int refX, int refY,
-            int tolerance, float confThreshold = 0.5f)
+            int tolerance, float confThreshold = 0.7f)
         {
-            var results = Detect(screenshot, new[] { label }, confThreshold);
+            var results = Detect(screenshot, null, confThreshold);
             if (results.Count == 0) return null;
 
-            // 容差为 0/负 视作不限制距离（退化为最高置信度）
             if (tolerance <= 0)
                 return results.OrderByDescending(d => d.Confidence).FirstOrDefault();
 
@@ -195,171 +215,41 @@ namespace WeChatAutomation.Core.Vision
                     best = d;
                 }
             }
-            // 附近没有 -> 回退到最高置信度，避免完全点不动
             return best ?? results.OrderByDescending(d => d.Confidence).FirstOrDefault();
         }
 
-        private DenseTensor<float> Preprocess(Bitmap image)
+        // ── Bitmap <-> Mat 转换 ──
+
+        private static Mat BitmapToMat(Bitmap bitmap)
         {
-            using var resized = new Bitmap(image, new Size(_inputWidth, _inputHeight));
-
-            var tensor = new DenseTensor<float>(new[] { 1, 3, _inputHeight, _inputWidth });
-            var bmpData = resized.LockBits(new Rectangle(0, 0, _inputWidth, _inputHeight),
-                ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-
+            // 统一转为 24bppBgr，避免 32bppArgb 通道顺序问题
+            using var bmp = new Bitmap(bitmap.Width, bitmap.Height, PixelFormat.Format24bppRgb);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.DrawImage(bitmap, new Rectangle(0, 0, bmp.Width, bmp.Height));
+            }
+            var bmpData = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             try
             {
-                int stride = bmpData.Stride;
-                int bytes = Math.Abs(stride) * _inputHeight;
-                byte[] rgbValues = new byte[bytes];
-                Marshal.Copy(bmpData.Scan0, rgbValues, 0, bytes);
-
-                for (int y = 0; y < _inputHeight; y++)
-                {
-                    int rowOffset = y * stride;
-                    for (int x = 0; x < _inputWidth; x++)
-                    {
-                        int offset = rowOffset + x * 3;
-                        float b = rgbValues[offset] / 255.0f;
-                        float g = rgbValues[offset + 1] / 255.0f;
-                        float r = rgbValues[offset + 2] / 255.0f;
-
-                        tensor[0, 0, y, x] = r;
-                        tensor[0, 1, y, x] = g;
-                        tensor[0, 2, y, x] = b;
-                    }
-                }
+                // FromPixelData 与源内存共享，需克隆脱离 LockBits 生命周期
+                using var mat = Mat.FromPixelData(bmp.Height, bmp.Width, MatType.CV_8UC3, bmpData.Scan0, bmpData.Stride);
+                return mat.Clone();
             }
             finally
             {
-                resized.UnlockBits(bmpData);
+                bmp.UnlockBits(bmpData);
             }
-
-            return tensor;
         }
 
-        private List<Detection> Postprocess(Tensor<float> output, float scaleX, float scaleY, float confThreshold)
+        private static Mat BitmapToGrayMat(Bitmap bitmap)
         {
-            var detections = new List<Detection>();
-            var dimensions = output.Dimensions.ToArray();
-
-            if (dimensions.Length == 3)
-            {
-                int dim1 = dimensions[1];
-                int dim2 = dimensions[2];
-
-                bool transposed = dim1 < dim2;
-
-                int numDetections = transposed ? dim2 : dim1;
-                int numValues = transposed ? dim1 : dim2;
-                int numClasses = numValues - 4;
-
-                for (int i = 0; i < numDetections; i++)
-                {
-                    float cx, cy, w, h;
-                    int bestClass = -1;
-                    float bestConf = 0;
-
-                    if (transposed)
-                    {
-                        cx = output[0, 0, i] * scaleX;
-                        cy = output[0, 1, i] * scaleY;
-                        w = output[0, 2, i] * scaleX;
-                        h = output[0, 3, i] * scaleY;
-
-                        for (int c = 0; c < numClasses; c++)
-                        {
-                            float conf = output[0, 4 + c, i];
-                            if (conf > bestConf)
-                            {
-                                bestConf = conf;
-                                bestClass = c;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        cx = output[0, i, 0] * scaleX;
-                        cy = output[0, i, 1] * scaleY;
-                        w = output[0, i, 2] * scaleX;
-                        h = output[0, i, 3] * scaleY;
-
-                        for (int c = 4; c < numValues; c++)
-                        {
-                            float conf = output[0, i, c];
-                            if (conf > bestConf)
-                            {
-                                bestConf = conf;
-                                bestClass = c - 4;
-                            }
-                        }
-                    }
-
-                    int x = (int)(cx - w / 2);
-                    int y = (int)(cy - h / 2);
-
-                    if (bestConf < confThreshold || bestClass < 0 || bestClass >= _labels.Length)
-                        continue;
-
-                    detections.Add(new Detection
-                    {
-                        Label = _labels[bestClass],
-                        Confidence = bestConf,
-                        X = Math.Max(0, x),
-                        Y = Math.Max(0, y),
-                        Width = (int)w,
-                        Height = (int)h
-                    });
-                }
-            }
-            else if (dimensions.Length == 2)
-            {
-                int numDetections = dimensions[0];
-                int numValues = dimensions[1];
-
-                for (int i = 0; i < numDetections; i++)
-                {
-                    float cx = output[i, 0] * scaleX;
-                    float cy = output[i, 1] * scaleY;
-                    float w = output[i, 2] * scaleX;
-                    float h = output[i, 3] * scaleY;
-
-                    int x = (int)(cx - w / 2);
-                    int y = (int)(cy - h / 2);
-
-                    int classStartIdx = 4;
-                    int bestClass = -1;
-                    float bestConf = 0;
-
-                    for (int c = classStartIdx; c < Math.Min(numValues, _labels.Length + classStartIdx); c++)
-                    {
-                        float conf = output[i, c];
-                        if (conf > bestConf)
-                        {
-                            bestConf = conf;
-                            bestClass = c - classStartIdx;
-                        }
-                    }
-
-                    if (bestConf < confThreshold || bestClass < 0 || bestClass >= _labels.Length)
-                        continue;
-
-                    detections.Add(new Detection
-                    {
-                        Label = _labels[bestClass],
-                        Confidence = bestConf,
-                        X = Math.Max(0, x),
-                        Y = Math.Max(0, y),
-                        Width = (int)w,
-                        Height = (int)h
-                    });
-                }
-            }
-
-            return detections;
+            using var bgr = BitmapToMat(bitmap);
+            var gray = new Mat();
+            Cv2.CvtColor(bgr, gray, ColorConversionCodes.BGR2GRAY);
+            return gray;
         }
 
-        private static List<Detection> NMS(List<Detection> detections, float iouThreshold)
+        private static List<Detection> NMS(List<Detection> detections, double iouThreshold)
         {
             var results = new List<Detection>();
             var sorted = detections.OrderByDescending(d => d.Confidence).ToList();
@@ -380,8 +270,10 @@ namespace WeChatAutomation.Core.Vision
         {
             if (!_disposed)
             {
-                _session?.Dispose();
-                _session = null;
+                _template?.Dispose();
+                _templateGray?.Dispose();
+                _template = null;
+                _templateGray = null;
                 _disposed = true;
             }
         }

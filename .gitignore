@@ -34,3 +34,6 @@
 # ── 发布产物 ──
 /publish/
 /releases/
+
+# ── 视觉模板匹配运行期产物 ──
+/templates/
