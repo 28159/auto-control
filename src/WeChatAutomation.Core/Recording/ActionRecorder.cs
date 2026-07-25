@@ -476,7 +476,99 @@ namespace WeChatAutomation.Core.Recording
             int dest = Math.Clamp(newOrder - 1, 0, _nodes.Count - 1);
             _nodes.RemoveAt(old);
             _nodes.Insert(dest, node);
+            RenumberOrders();
+        }
+
+        /// <summary>
+        /// 重新编号顶层步骤 Order（1..N）。嵌套步骤的 Order 不参与显示/跳转，不重排。
+        /// </summary>
+        private void RenumberOrders()
+        {
             for (int i = 0; i < _nodes.Count; i++) _nodes[i].Order = i + 1;
+        }
+
+        /// <summary>
+        /// 递归查找 nodeId 所在位置（覆盖任意嵌套深度）。
+        /// 返回节点、所在列表、父容器（顶层为 null）、是否在 True 分支。
+        /// </summary>
+        public NodeLocation? FindNode(string nodeId) => FindNodeRecursive(_nodes, nodeId, null);
+
+        private static NodeLocation? FindNodeRecursive(List<RecordedAction> list, string nodeId, RecordedAction? parent)
+        {
+            foreach (var a in list)
+            {
+                if (a.NodeId == nodeId)
+                    return new NodeLocation(a, list, parent, parent != null && ReferenceEquals(list, parent.TrueActions));
+            }
+            foreach (var a in list)
+            {
+                if (a.TrueActions != null)
+                {
+                    var r = FindNodeRecursive(a.TrueActions, nodeId, a);
+                    if (r != null) return r;
+                }
+                if (a.FalseActions != null)
+                {
+                    var r = FindNodeRecursive(a.FalseActions, nodeId, a);
+                    if (r != null) return r;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 通用移动：把 draggedId 从原位置移除，插入 targetList 的 targetIndex。
+        /// targetList 为 null 表示移到顶层 _nodes。同列表且移除点在目标前则 targetIndex 前移一位。最后重排顶层 Order。
+        /// </summary>
+        public bool MoveNodeTo(string draggedId, List<RecordedAction>? targetList, int targetIndex)
+        {
+            var loc = FindNode(draggedId);
+            if (loc == null) return false;
+            var dragged = loc.Node;
+            var srcList = loc.List;
+            var destList = targetList ?? _nodes;
+
+            int oldIndex = srcList.IndexOf(dragged);
+            if (oldIndex < 0) return false;
+            srcList.RemoveAt(oldIndex);
+
+            if (ReferenceEquals(srcList, destList) && oldIndex < targetIndex)
+                targetIndex--;
+
+            targetIndex = Math.Clamp(targetIndex, 0, destList.Count);
+            destList.Insert(targetIndex, dragged);
+            RenumberOrders();
+            return true;
+        }
+
+        /// <summary>
+        /// 收集 container 及其所有后代（任意深度）的 NodeId，用于环检测。
+        /// </summary>
+        public static HashSet<string> CollectSubtreeIds(RecordedAction container)
+        {
+            var set = new HashSet<string>();
+            CollectSubtreeIdsRecursive(container, set);
+            return set;
+        }
+
+        private static void CollectSubtreeIdsRecursive(RecordedAction node, HashSet<string> set)
+        {
+            set.Add(node.NodeId);
+            if (node.TrueActions != null)
+                foreach (var a in node.TrueActions) CollectSubtreeIdsRecursive(a, set);
+            if (node.FalseActions != null)
+                foreach (var a in node.FalseActions) CollectSubtreeIdsRecursive(a, set);
+        }
+
+        /// <summary>节点定位结果：节点、所在列表、父容器、是否 True 分支。</summary>
+        public sealed class NodeLocation
+        {
+            public RecordedAction Node { get; }
+            public List<RecordedAction> List { get; }
+            public RecordedAction? Parent { get; }
+            public bool InTrueBranch { get; }
+            public NodeLocation(RecordedAction node, List<RecordedAction> list, RecordedAction? parent, bool inTrueBranch)
+            { Node = node; List = list; Parent = parent; InTrueBranch = inTrueBranch; }
         }
 
         // ── 训练数据采集 ──

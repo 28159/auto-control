@@ -18,6 +18,11 @@ namespace WeChatAutomation.Core.Services
         private CancellationTokenSource _currentCts;
 
         public bool IsExecuting => _player?.IsPlaying == true;
+
+        /// <summary>当前执行来源："CloudTask"/"LocalScheduler"/"Manual"/null。获锁后置、释放后清。</summary>
+        private string _currentSource;
+        public string CurrentSource => _currentSource;
+
         public event EventHandler<ExecuteResult> ExecutionCompleted;
         public event EventHandler<string> LogMessage;
 
@@ -125,21 +130,37 @@ namespace WeChatAutomation.Core.Services
             }
         }
 
-        public async Task<ExecuteResult> ExecuteScript(string scriptName, Dictionary<string, string> parameters = null)
+        public async Task<ExecuteResult> ExecuteScript(string scriptName, Dictionary<string, string> parameters = null, string source = null)
         {
-            if (!await _executionLock.WaitAsync(0))
+            // 云端任务抢占本地定时任务：若本地定时脚本正在运行，先停止它再等锁。
+            // 手动回放(source=null/Manual)与已在跑的云端任务不被抢占。
+            if (source == "CloudTask" && _player?.IsPlaying == true && _currentSource == "LocalScheduler")
+            {
+                _logger.Info("Executor", "云端任务抢占：停止本地定时任务");
+                LogMessage?.Invoke(this, "云端任务抢占：停止本地定时任务");
+                try { StopExecution(); } catch { }
+            }
+
+            // CloudTask 等待本地释放信号量（最多 15s）；其余来源非阻塞，抢不到即跳过
+            bool acquired = source == "CloudTask"
+                ? await _executionLock.WaitAsync(15000)
+                : await _executionLock.WaitAsync(0);
+
+            if (!acquired)
             {
                 return new ExecuteResult
                 {
                     Success = false,
                     Message = "有其他脚本正在执行中",
                     ScriptName = scriptName,
-                    ExecutedAt = DateTime.Now
+                    ExecutedAt = DateTime.Now,
+                    SkippedDueToBusy = true
                 };
             }
 
             try
             {
+                _currentSource = source ?? "Manual";
                 var filePath = Path.Combine(_scriptsDir, $"{scriptName}.json");
                 if (!File.Exists(filePath))
                 {
@@ -209,6 +230,7 @@ namespace WeChatAutomation.Core.Services
             }
             finally
             {
+                _currentSource = null;
                 _executionLock.Release();
                 _currentCts?.Dispose();
                 _currentCts = null;
@@ -261,6 +283,18 @@ namespace WeChatAutomation.Core.Services
         public void StopExecution()
         {
             _player?.Stop();
+        }
+
+        /// <summary>等待执行器空闲（停止后等其释放信号量）。超时返回 false。</summary>
+        public async Task<bool> WaitForIdleAsync(int timeoutMs, CancellationToken ct = default)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (IsExecuting && sw.ElapsedMilliseconds < timeoutMs)
+            {
+                try { await Task.Delay(100, ct); }
+                catch (OperationCanceledException) { return !IsExecuting; }
+            }
+            return !IsExecuting;
         }
 
         private Dictionary<string, string> ResolveParameterIds(Dictionary<string, string> inputParams, List<ScriptParameter> definedParams)

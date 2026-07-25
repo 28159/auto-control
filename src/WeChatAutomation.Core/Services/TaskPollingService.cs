@@ -214,10 +214,6 @@ namespace WeChatAutomation.Core.Services
 
         private async Task<RemoteTaskExecutionResult> PollAndExecuteTask()
         {
-            // 如果有脚本正在执行，跳过
-            if (_executor is ScriptExecutor se && se.IsExecuting)
-                return null;
-
             try
             {
                 // 1. 拉取待执行任务
@@ -231,9 +227,19 @@ namespace WeChatAutomation.Core.Services
                 if (apiResp?.Data?.Items == null || apiResp.Data.Items.Count == 0)
                     return null; // 无待执行任务
 
+                // 2. 抢占判定：执行器忙时，仅抢占本地定时任务(LocalScheduler)；
+                //    手动回放(Manual)或已在跑的云端任务不抢占 -> 跳过本轮（不认领，避免任务卡死）。
+                if (_executor.IsExecuting)
+                {
+                    var src = _executor.CurrentSource;
+                    if (src != "LocalScheduler")
+                        return null;
+                    _logger.Info("TaskPolling", $"检测到本地定时任务({src})正在执行，将抢占");
+                }
+
                 var task = apiResp.Data.Items[0];
 
-                // 2. 认领任务
+                // 3. 认领任务
                 var claimed = await ClaimTask(task.TaskId);
                 if (!claimed)
                 {
@@ -243,10 +249,10 @@ namespace WeChatAutomation.Core.Services
 
                 _logger.Info("TaskPolling", $"已认领任务: {task.TaskId} ({task.TaskType})");
 
-                // 3. 执行任务
+                // 4. 执行任务（source=CloudTask，内部完成对本地定时任务的抢占）
                 var result = await ExecuteTask(task);
 
-                // 4. 回传结果
+                // 5. 回传结果
                 await ReportTaskResult(task.TaskId, result);
 
                 return result;
@@ -321,8 +327,8 @@ namespace WeChatAutomation.Core.Services
 
                 _logger.Info("TaskPolling", $"执行任务: {task.TaskId} → 脚本 {scriptName} ({parameters.Count} 个参数)");
 
-                // 执行脚本
-                var result = await _executor.ExecuteScript(scriptName, parameters);
+                // 执行脚本（标记来源为 CloudTask，ScriptExecutor 据此抢占本地定时任务）
+                var result = await _executor.ExecuteScript(scriptName, parameters, "CloudTask");
 
                 sw.Stop();
 

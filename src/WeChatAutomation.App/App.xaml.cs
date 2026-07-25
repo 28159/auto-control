@@ -1,10 +1,12 @@
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using WeChatAutomation.Core;
 using WeChatAutomation.Core.Logging;
+using WeChatAutomation.Core.Native;
 using WeChatAutomation.Core.Services;
 
 namespace WeChatAutomation.App;
@@ -19,6 +21,7 @@ public partial class App : Application
     public static MqttService Mqtt { get; private set; }
     public static McpServerService Mcp { get; set; }
     public static TaskPollingService TaskPolling { get; private set; }
+    public static LocalSchedulerService LocalScheduler { get; private set; }
     public static IConfiguration Configuration { get; private set; }
 
     protected override void OnStartup(StartupEventArgs e)
@@ -42,6 +45,7 @@ public partial class App : Application
                 services.AddSingleton<MqttService>();
                 services.AddSingleton<McpServerService>();
                 services.AddSingleton<TaskPollingService>();
+                services.AddSingleton<LocalSchedulerService>();
             })
             .Build();
 
@@ -56,6 +60,7 @@ public partial class App : Application
         HttpApi = _host.Services.GetRequiredService<HttpApiService>();
         Mqtt = _host.Services.GetRequiredService<MqttService>();
         TaskPolling = _host.Services.GetRequiredService<TaskPollingService>();
+        LocalScheduler = _host.Services.GetRequiredService<LocalSchedulerService>();
 
         // 根据配置决定是否启动各服务
         var httpEnabled = Configuration.GetValue("HttpApi:Enabled", false);
@@ -88,7 +93,34 @@ public partial class App : Application
             _logger.Info("App", "任务轮询服务已自动启动");
         }
 
+        var schedulerAutoStart = Configuration.GetValue("LocalScheduler:AutoStart", true);
+        if (schedulerAutoStart)
+        {
+            _ = LocalScheduler.StartManual(CancellationToken.None);
+            _logger.Info("App", "本地调度服务已自动启动");
+        }
+
         _logger.Info("App", "应用已启动");
+
+        // 启动时后台预激活微信 UIA 树（微信4.x无障碍客户端检测）：
+        // 避免首次 UIA 点击/阅读定位失败。后台异步不阻塞 UI；微信未开则跳过，后续按需激活仍会触发。
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                // 立即激活一次（微信已开则生效）
+                UIATreeActivator.ActivateWeChat();
+                // 延迟再试一次，覆盖"本程序先启动、微信后开"的场景
+                System.Threading.Thread.Sleep(5000);
+                UIATreeActivator.ClearCache();
+                UIATreeActivator.ActivateWeChat();
+                _logger.Info("App", "微信 UIA 树预激活完成");
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn("App", $"微信 UIA 树预激活失败: {ex.Message}");
+            }
+        });
 
         // 诊断：把日志写到项目根 wizard.log，便于排查向导/标注问题
         try
@@ -113,11 +145,13 @@ public partial class App : Application
             Mqtt?.StopAsync(CancellationToken.None).Wait(5000);
             Mcp?.StopAsync(CancellationToken.None).Wait(5000);
             TaskPolling?.StopAsync(CancellationToken.None).Wait(5000);
+            LocalScheduler?.StopAsync(CancellationToken.None).Wait(5000);
 
             HttpApi?.Dispose();
             Mqtt?.Dispose();
             Mcp?.Dispose();
             TaskPolling?.Dispose();
+            LocalScheduler?.Dispose();
             (ScriptExecutor as IDisposable)?.Dispose();
         }
         catch (Exception ex)

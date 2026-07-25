@@ -243,7 +243,7 @@
                                         <ColumnDefinition Width="34" SharedSizeGroup="ColOrder"/>
                                         <ColumnDefinition Width="70" SharedSizeGroup="ColType"/>
                                         <ColumnDefinition Width="120" SharedSizeGroup="ColName"/>
-                                        <ColumnDefinition Width="*" SharedSizeGroup="ColSummary"/>
+                                        <ColumnDefinition Width="260"/>
                                         <ColumnDefinition Width="54" SharedSizeGroup="ColMode"/>
                                         <ColumnDefinition Width="48" SharedSizeGroup="ColDelay"/>
                                         <ColumnDefinition Width="80" SharedSizeGroup="ColRandom"/>
@@ -267,10 +267,11 @@
                             <!-- 表体 TreeView -->
                             <TreeView Grid.Row="1" x:Name="StepsTree"
                                       MouseDoubleClick="StepsTree_MouseDoubleClick"
+                                      AllowDrop="True"
                                       VirtualizingStackPanel.IsVirtualizing="True"
                                       VirtualizingStackPanel.VirtualizationMode="Recycling"
                                       BorderThickness="0" Background="White"
-                                      ToolTip="双击编辑步骤；If 步骤可展开查看 True/False 分支">
+                                      ToolTip="双击编辑步骤；拖拽步骤到 While/循环节点放入循环体，循环体内上下拖排序">
                                 <TreeView.Resources>
                                     <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="{StaticResource SelectionColor}"/>
                                     <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}" Color="{StaticResource SelectionColor}"/>
@@ -322,7 +323,7 @@
                                                     <ColumnDefinition Width="34" SharedSizeGroup="ColOrder"/>
                                                     <ColumnDefinition Width="70" SharedSizeGroup="ColType"/>
                                                     <ColumnDefinition Width="120" SharedSizeGroup="ColName"/>
-                                                    <ColumnDefinition Width="*" SharedSizeGroup="ColSummary"/>
+                                                    <ColumnDefinition Width="260"/>
                                                     <ColumnDefinition Width="54" SharedSizeGroup="ColMode"/>
                                                     <ColumnDefinition Width="48" SharedSizeGroup="ColDelay"/>
                                                     <ColumnDefinition Width="80" SharedSizeGroup="ColRandom"/>
@@ -352,7 +353,63 @@
                                                     <Button Content="▶" Click="RunSingleAction_Click" Padding="4,1" FontSize="9" Tag="{Binding Action}" Margin="0,0,2,0" ToolTip="单独运行"/>
                                                     <Button Content="✕" Click="DeleteSingleTreeNode_Click" Padding="4,1" FontSize="9" Foreground="{StaticResource DangerBrush}" Tag="{Binding}" ToolTip="删除"/>
                                                 </StackPanel>
+
+                                                <!-- 拖放落点指示：顶边线=Before / 底边线=After / 整行高亮=Into -->
+                                                <Border Grid.Column="0" Grid.ColumnSpan="11" Height="2" VerticalAlignment="Top" Background="#1976D2" Margin="-2,0" IsHitTestVisible="False">
+                                                    <Border.Style>
+                                                        <Style TargetType="Border">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding DropHint}" Value="Before">
+                                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Border.Style>
+                                                </Border>
+                                                <Border Grid.Column="0" Grid.ColumnSpan="11" Height="2" VerticalAlignment="Bottom" Background="#1976D2" Margin="-2,0" IsHitTestVisible="False">
+                                                    <Border.Style>
+                                                        <Style TargetType="Border">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding DropHint}" Value="After">
+                                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Border.Style>
+                                                </Border>
+                                                <Border Grid.Column="0" Grid.ColumnSpan="11" Background="#330096FF" IsHitTestVisible="False">
+                                                    <Border.Style>
+                                                        <Style TargetType="Border">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding DropHint}" Value="Into">
+                                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Border.Style>
+                                                </Border>
                                             </Grid>
+
+                                            <!-- 分支头拖入高亮（拖到 循环体/True/False 头=追加到该分支） -->
+                                            <Border Background="#330096FF" CornerRadius="4" Margin="6,2" IsHitTestVisible="False">
+                                                <Border.Style>
+                                                    <Style TargetType="Border">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                        <Style.Triggers>
+                                                            <MultiDataTrigger>
+                                                                <MultiDataTrigger.Conditions>
+                                                                    <Condition Binding="{Binding IsBranchHeader}" Value="True"/>
+                                                                    <Condition Binding="{Binding DropHint}" Value="Into"/>
+                                                                </MultiDataTrigger.Conditions>
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                            </MultiDataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                            </Border>
                                         </Grid>
                                     </HierarchicalDataTemplate>
                                 </TreeView.Resources>
@@ -392,6 +449,13 @@
                                             <Button Content="🔀判断" Click="AddIf_Click" Padding="{StaticResource ButtonPaddingSmall}" Margin="0,0,2,0" FontSize="11" ToolTip="条件判断"/>
                                             <Button Content="🔁While" Click="AddWhile_Click" Padding="{StaticResource ButtonPaddingSmall}" Margin="0,0,2,0" FontSize="11" ToolTip="条件循环"/>
                                             <Button Content="🔢N次" Click="AddLoop_Click" Padding="{StaticResource ButtonPaddingSmall}" FontSize="11" ToolTip="固定次数循环"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <Border Style="{StaticResource GroupBox}">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="调试" Style="{StaticResource GroupLabel}"/>
+                                            <Button Content="🌳UIA树" Click="UiaTreeBtn_Click" Padding="{StaticResource ButtonPaddingSmall}" FontSize="11" ToolTip="点击元素，交互式浏览其窗口的 UIA 树"/>
                                         </StackPanel>
                                     </Border>
 
@@ -646,6 +710,16 @@
                             <TextBlock x:Name="TaskPollingStatusText" Text="" FontSize="10" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center"/>
                             <Button x:Name="TaskPollingToggleBtn" Content="开启" Click="TaskPollingToggle_Click" Padding="7,1" Margin="6,0,0,0" FontSize="10"/>
                             <Button Content="⚙" Click="TaskPollingConfig_Click" Padding="4,1" Margin="3,0,0,0" FontSize="10" ToolTip="轮询配置"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Background="{StaticResource BackgroundPageBrush}" CornerRadius="12" Padding="8,3" Margin="8,0,0,0">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse x:Name="SchedulerStatusDot" Width="8" Height="8" Fill="{StaticResource StatusOffBrush}" Margin="0,0,5,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="定时" FontSize="11" Foreground="{StaticResource TextBodyBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <TextBlock x:Name="SchedulerStatusText" Text="" FontSize="10" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center"/>
+                            <Button x:Name="SchedulerToggleBtn" Content="开启" Click="SchedulerToggle_Click" Padding="7,1" Margin="6,0,0,0" FontSize="10"/>
+                            <Button Content="⚙" Click="SchedulerConfig_Click" Padding="4,1" Margin="3,0,0,0" FontSize="10" ToolTip="定时任务管理"/>
                         </StackPanel>
                     </Border>
                 </StackPanel>

@@ -196,6 +196,7 @@ namespace WeChatAutomation.Core.Native
         public const byte VK_RIGHT = 0x27;
         public const byte VK_DOWN = 0x28;
         public const byte VK_DELETE = 0x2E;
+        public const byte VK_INSERT = 0x2D;
         public const byte VK_A = 0x41;
         public const byte VK_C = 0x43;
         public const byte VK_S = 0x53;
@@ -334,7 +335,12 @@ namespace WeChatAutomation.Core.Native
             public IntPtr dwExtraInfo;
         }
 
+        public const byte VK_F1 = 0x70;
+        public const byte VK_F2 = 0x71;
+        public const byte VK_F3 = 0x72;
+        public const byte VK_F4 = 0x73;
         public const byte VK_F5 = 0x74;
+        public const byte VK_F6 = 0x75;
         public const byte VK_F7 = 0x76;
         public const byte VK_F8 = 0x77;
         public const byte VK_F9 = 0x78;

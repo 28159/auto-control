@@ -939,6 +939,8 @@ namespace WeChatAutomation.Core.Recording
                     return (false, IntPtr.Zero, default);
                 }
 
+                // 激活微信4.x等应用的UIA树（无障碍客户端检测），否则FlaUI在空壳树上定位失败
+                UIATreeActivator.Activate(hwnd);
                 var root = _automation.FromHandle(hwnd);
                 if (root == null)
                 {
@@ -2078,6 +2080,7 @@ namespace WeChatAutomation.Core.Recording
                 {
                     // 仅有窗口句柄，从窗口根元素出发查找内容区域
                     hwnd = _targetWindow;
+                    UIATreeActivator.Activate(hwnd);
                     var windowElement = _automation.FromHandle(hwnd);
                     var contentElement = FindContentElement(windowElement);
                     readElement = contentElement ?? windowElement;
@@ -2088,6 +2091,7 @@ namespace WeChatAutomation.Core.Recording
                     hwnd = ResolveTargetWindow(windowTitle);
                     if (hwnd == IntPtr.Zero) { OnLog("无法获取目标窗口"); return; }
 
+                    UIATreeActivator.Activate(hwnd);
                     var element = _automation.FromHandle(hwnd);
                     var contentElement = FindContentElement(element);
                     readElement = contentElement ?? element;
@@ -2331,6 +2335,7 @@ namespace WeChatAutomation.Core.Recording
                 else if (_targetWindow != IntPtr.Zero)
                 {
                     hwnd = _targetWindow;
+                    UIATreeActivator.Activate(hwnd);
                     var windowElement = _automation.FromHandle(hwnd);
                     var contentElement = FindContentElement(windowElement);
                     readElement = contentElement ?? windowElement;
@@ -2340,6 +2345,7 @@ namespace WeChatAutomation.Core.Recording
                     hwnd = ResolveTargetWindow(windowTitle);
                     if (hwnd == IntPtr.Zero) { OnLog("无法获取目标窗口"); return; }
 
+                    UIATreeActivator.Activate(hwnd);
                     var element = _automation.FromHandle(hwnd);
                     var contentElement = FindContentElement(element);
                     readElement = contentElement ?? element;
@@ -2385,12 +2391,14 @@ namespace WeChatAutomation.Core.Recording
                 }
                 else if (_targetWindow != IntPtr.Zero)
                 {
+                    UIATreeActivator.Activate(hwnd);
                     var windowElement = _automation.FromHandle(hwnd);
                     var contentElement = FindContentElement(windowElement);
                     content = ExtractAllText(contentElement ?? windowElement, 0, 10);
                 }
                 else
                 {
+                    UIATreeActivator.Activate(hwnd);
                     var element = _automation.FromHandle(hwnd);
                     var contentElement = FindContentElement(element);
                     content = ExtractAllText(contentElement ?? element, 0, 10);
@@ -2586,6 +2594,7 @@ namespace WeChatAutomation.Core.Recording
                 else if (_targetWindow != IntPtr.Zero)
                 {
                     hwnd = _targetWindow;
+                    UIATreeActivator.Activate(hwnd);
                     var windowElement = _automation.FromHandle(hwnd);
                     var contentElement = FindContentElement(windowElement);
                     content = ExtractAllText(contentElement ?? windowElement, 0, 10);
@@ -2595,6 +2604,7 @@ namespace WeChatAutomation.Core.Recording
                     hwnd = ResolveTargetWindow(node.WindowTitle);
                     if (hwnd == IntPtr.Zero) { OnLog("正则识别: 无法获取目标窗口"); return; }
 
+                    UIATreeActivator.Activate(hwnd);
                     var element = _automation.FromHandle(hwnd);
                     var contentElement = FindContentElement(element);
                     content = ExtractAllText(contentElement ?? element, 0, 10);

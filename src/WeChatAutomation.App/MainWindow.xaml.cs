@@ -44,6 +44,11 @@ namespace WeChatAutomation.App
         private ScriptInfo _currentScript;
         private WeChatAutomation.Core.Recording.ClickMode _currentClickMode = WeChatAutomation.Core.Recording.ClickMode.Coordinate;
 
+        // ═══ 步骤树拖拽（放入循环体/排序/移出） ═══
+        private string? _dragSourceId;          // 拖动中的动作 NodeId
+        private Point _dragStartPoint;          // 拖动起点（位移超阈值才发起 DoDragDrop）
+        private StepTreeNode? _dropHintNode;    // 当前显示落点提示的节点
+
         public MainWindow()
         {
             InitializeComponent();
@@ -53,6 +58,12 @@ namespace WeChatAutomation.App
             UpdateClickModeUI();
 
             StepsTree.ItemsSource = BuildStepTree();
+            StepsTree.PreviewMouseLeftButtonDown += StepsTree_PreviewMouseLeftButtonDown;
+            StepsTree.PreviewMouseMove += StepsTree_PreviewMouseMove;
+            StepsTree.DragEnter += StepsTree_DragOver;
+            StepsTree.DragOver += StepsTree_DragOver;
+            StepsTree.DragLeave += StepsTree_DragLeave;
+            StepsTree.Drop += StepsTree_Drop;
             SelectAllCheckBox.Checked += SelectAllCheckBox_Changed;
             SelectAllCheckBox.Unchecked += SelectAllCheckBox_Changed;
             ScriptsListBox.ItemsSource = _scripts;
@@ -101,10 +112,21 @@ namespace WeChatAutomation.App
             // 初始化服务状态显示
             Dispatcher.BeginInvoke(() => UpdateServiceStatus(), System.Windows.Threading.DispatcherPriority.Background);
 
-            // 任务列表定时刷新
+            // 任务列表 + 定时调度 定时刷新
             var taskRefreshTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
-            taskRefreshTimer.Tick += (_, _) => RefreshTaskHistory();
+            taskRefreshTimer.Tick += (_, _) => { RefreshTaskHistory(); RefreshSchedules(); };
             taskRefreshTimer.Start();
+
+            // 订阅本地调度事件（执行完成 -> 日志 + 刷新；列表变更 -> 刷新）
+            if (App.LocalScheduler != null)
+            {
+                App.LocalScheduler.SchedulesChanged += (_, _) => Dispatcher.BeginInvoke(new Action(RefreshSchedules));
+                App.LocalScheduler.ScheduleExecuted += (_, e) => Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    AppendLog($"[定时] 执行 {e.ScriptName}: {(e.Success ? "✅完成" : "❌失败")} {e.Message}");
+                    RefreshSchedules();
+                }));
+            }
         }
 
         // ═══ 快捷键 ═══
@@ -190,7 +212,22 @@ namespace WeChatAutomation.App
         }
         private void AddKeys_Click(object s, RoutedEventArgs e)
         {
-            var k = ShowInput("按键", "如 Enter, Ctrl+A:"); if (k != null) AddOrRun(ActionType.SendKeys, k, k);
+            var k = ShowKeyCaptureDialog(null);
+            if (!string.IsNullOrEmpty(k)) AddOrRun(ActionType.SendKeys, k, k);
+        }
+
+        /// <summary>
+        /// 打开按键学习对话框（按键盘学习 + 可手动编辑）。期间暂停全局热键，避免 F5/F9 等双触发。
+        /// </summary>
+        private string? ShowKeyCaptureDialog(string? initial)
+        {
+            _hotkeyHook.StopCapture();
+            try
+            {
+                var dlg = new KeyCaptureDialog(initial) { Owner = this };
+                return dlg.ShowDialog() == true ? dlg.Keys : null;
+            }
+            finally { _hotkeyHook.StartCapture(); }
         }
         private void AddCopy_Click(object s, RoutedEventArgs e) => AddOrRun(ActionType.Copy, name: "复制");
         private void AddPaste_Click(object s, RoutedEventArgs e) => AddOrRun(ActionType.Paste, name: "粘贴");
@@ -705,6 +742,16 @@ namespace WeChatAutomation.App
             paramPanel.Children.Add(new TextBlock { Text = "参数:", Margin = new Thickness(0, 0, 0, 3) });
             var paramBox = new TextBox { Text = node.Parameter ?? "", TextWrapping = TextWrapping.Wrap, AcceptsReturn = true, MaxHeight = 80 };
             paramPanel.Children.Add(paramBox);
+            // 按键学习按钮（仅 SendKeys 显示）：按键盘捕获按键填入参数框
+            var keysLearnPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0), Visibility = Visibility.Collapsed };
+            var keysLearnBtn = new Button { Content = "🎤 学习按键", Padding = new Thickness(10, 3, 10, 3), FontSize = 11, ToolTip = "按下键盘上的键来录入按键步骤" };
+            keysLearnBtn.Click += (_, _) =>
+            {
+                var k = ShowKeyCaptureDialog(paramBox.Text);
+                if (k != null) { paramBox.Text = k; paramBox.Focus(); paramBox.CaretIndex = paramBox.Text.Length; }
+            };
+            keysLearnPanel.Children.Add(keysLearnBtn);
+            paramPanel.Children.Add(keysLearnPanel);
             sp.Children.Add(paramPanel);
 
             // ── 步骤后行为：随机等待 + 鼠标随机移动（所有步骤类型可用） ──
@@ -963,6 +1010,7 @@ namespace WeChatAutomation.App
                     || t == ActionType.RegexMatch || t == ActionType.SwitchToWindow) ? Visibility.Visible : Visibility.Collapsed;
                 paramPanel.Visibility = (t == ActionType.TypeText || t == ActionType.SendKeys
                     || t == ActionType.InsertText || t == ActionType.OpenApp || t == ActionType.WaitForApp) ? Visibility.Visible : Visibility.Collapsed;
+                keysLearnPanel.Visibility = t == ActionType.SendKeys ? Visibility.Visible : Visibility.Collapsed;
                 scrollPanel.Visibility = (t == ActionType.Scroll || t == ActionType.ScrollRead) ? Visibility.Visible : Visibility.Collapsed;
                 outputVarPanel.Visibility = (isClick || t == ActionType.ReadContent || t == ActionType.ScrollRead || t == ActionType.RegexMatch) ? Visibility.Visible : Visibility.Collapsed;
                 readModePanel.Visibility = (t == ActionType.ReadContent || t == ActionType.ScrollRead) ? Visibility.Visible : Visibility.Collapsed;
@@ -1523,7 +1571,7 @@ namespace WeChatAutomation.App
             // 检查是否是嵌套步骤
             if (treeNode.ParentIfNodeId != null)
             {
-                var parentIf = _steps.FirstOrDefault(a => a.NodeId == treeNode.ParentIfNodeId);
+                var parentIf = _recorder.FindNode(treeNode.ParentIfNodeId)?.Node;
                 if (parentIf != null)
                 {
                     string branchName = treeNode.IsInTrueBranch ? "True" : "False";
@@ -1560,7 +1608,215 @@ namespace WeChatAutomation.App
             foreach (var s in _steps) _recorder.AddManual(s);
         }
 
-        // ═══ 拖拽排序（TreeView 简化版：暂不支持拖放，使用上移/下移按钮） ═══
+        // ═══ 拖拽排序：拖步骤到 While/循环节点放入循环体；循环体内上下拖排序；拖出回顶层 ═══
+
+        private sealed class DropTarget
+        {
+            public List<RecordedAction>? List;        // 目标列表（Into 空分支时为 null，由 Drop 初始化）
+            public RecordedAction? IntoContainer;      // Into 落点所在容器（用于初始化空分支列表）
+            public bool IntoTrueBranch;                // Into 落点是否 True 分支
+            public int Index;
+            public DropHint Hint;
+            public StepTreeNode? TargetNode;           // 显示落点提示的节点（空白区为 null）
+            public bool Valid;
+        }
+
+        private static bool IsContainerAction(RecordedAction a) =>
+            a.ActionType == ActionType.If || a.ActionType == ActionType.While ||
+            a.ActionType == ActionType.Loop || a.ActionType == ActionType.Try;
+
+        // 拖动起点：记录待拖动作（分支头/点中按钮勾选框文本框时不发起）
+        private void StepsTree_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            _dragStartPoint = e.GetPosition(null);
+            _dragSourceId = null;
+
+            var tvi = GetTreeViewItemAtPoint(StepsTree, e.GetPosition(StepsTree));
+            if (tvi?.DataContext is not StepTreeNode node) return;
+            if (node.IsBranchHeader || node.Action == null) return;
+            if (IsOverInteractiveControl(e.OriginalSource)) return;
+
+            _dragSourceId = node.Action.NodeId;
+        }
+
+        // 位移超阈值则发起拖拽
+        private void StepsTree_PreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (_dragSourceId == null || e.LeftButton != MouseButtonState.Pressed) return;
+            var pos = e.GetPosition(null);
+            if (Math.Abs(pos.X - _dragStartPoint.X) < SystemParameters.MinimumHorizontalDragDistance &&
+                Math.Abs(pos.Y - _dragStartPoint.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+
+            try { DragDrop.DoDragDrop(StepsTree, _dragSourceId, DragDropEffects.Move); }
+            catch (Exception ex) { AppendLog($"拖拽失败: {ex.Message}"); }
+            finally { _dragSourceId = null; ClearDropHint(); }
+        }
+
+        private void StepsTree_DragOver(object sender, DragEventArgs e)
+        {
+            var drop = ResolveDropTarget(e);
+            if (drop == null || !drop.Valid)
+            {
+                e.Effects = DragDropEffects.None;
+                ClearDropHint();
+            }
+            else
+            {
+                e.Effects = DragDropEffects.Move;
+                SetDropHint(drop.TargetNode, drop.Hint);
+            }
+            e.Handled = true;
+        }
+
+        private void StepsTree_DragLeave(object sender, DragEventArgs e) => ClearDropHint();
+
+        private void StepsTree_Drop(object sender, DragEventArgs e)
+        {
+            var drop = ResolveDropTarget(e);
+            ClearDropHint();
+            if (drop == null || !drop.Valid || _dragSourceId == null) { e.Handled = true; return; }
+
+            // Into 空分支：此时才初始化列表，避免 DragOver 悬停就给容器挂空体
+            List<RecordedAction>? list = drop.List;
+            if (list == null && drop.IntoContainer != null)
+            {
+                list = drop.IntoTrueBranch
+                    ? (drop.IntoContainer.TrueActions ??= new List<RecordedAction>())
+                    : (drop.IntoContainer.FalseActions ??= new List<RecordedAction>());
+            }
+            // list 仍为 null = 顶层末尾
+
+            try
+            {
+                if (_recorder.MoveNodeTo(_dragSourceId, list, drop.Index))
+                {
+                    RefreshStepTree();
+                    SelectTreeNodeByActionId(_dragSourceId);
+                    PlayBtn.IsEnabled = _steps.Count > 0;
+                    AppendLog($"已移动步骤{HintText(drop.Hint)}");
+                }
+            }
+            catch (Exception ex) { AppendLog($"移动失败: {ex.Message}"); }
+            finally { e.Handled = true; }
+        }
+
+        // 解析落点：返回目标列表/索引/提示/合法性
+        private DropTarget? ResolveDropTarget(DragEventArgs e)
+        {
+            if (_dragSourceId == null) return null;
+            var dragLoc = _recorder.FindNode(_dragSourceId);
+            if (dragLoc == null) return null;
+            var dragged = dragLoc.Node;
+            var subtree = IsContainerAction(dragged) ? ActionRecorder.CollectSubtreeIds(dragged) : null;
+
+            var tvi = GetTreeViewItemAtPoint(StepsTree, e.GetPosition(StepsTree));
+            StepTreeNode? target = tvi?.DataContext as StepTreeNode;
+
+            if (target == null)
+            {
+                // 空白区：顶层末尾（List=null 表示顶层，由 MoveNodeTo 处理）
+                return new DropTarget { List = null, Index = _recorder.Nodes.Count, Hint = DropHint.None, TargetNode = null, Valid = true };
+            }
+            if (tvi == null) return null;
+
+            // 分支头：追加到该分支
+            if (target.IsBranchHeader)
+            {
+                var parent = string.IsNullOrEmpty(target.ParentIfNodeId) ? null : _recorder.FindNode(target.ParentIfNodeId)?.Node;
+                if (parent == null) return null;
+                bool intoTrue = target.IsInTrueBranch;
+                var list = intoTrue ? parent.TrueActions : parent.FalseActions;
+                bool valid = subtree == null || !subtree.Contains(parent.NodeId);
+                return new DropTarget { List = list, IntoContainer = parent, IntoTrueBranch = intoTrue, Index = list?.Count ?? 0, Hint = DropHint.Into, TargetNode = target, Valid = valid };
+            }
+
+            if (target.Action == null) return null;
+            string targetId = target.Action.NodeId;
+
+            // 行头高度与光标纵向位置（相对 PART_Header）
+            var headerEl = tvi.Template?.FindName("PART_Header", tvi) as FrameworkElement;
+            double h = headerEl != null && headerEl.ActualHeight > 0 ? headerEl.ActualHeight : 0;
+            double y = h > 0 ? e.GetPosition(headerEl).Y : 0;
+
+            bool isContainer = IsContainerAction(target.Action);
+            // 容器中段（或取不到行高）= Into：追加到 TrueActions/循环体
+            if (isContainer && (h <= 0 || (y >= h * 0.3 && y <= h * 0.7)))
+            {
+                var list = target.Action.TrueActions;
+                bool valid = subtree == null || !subtree.Contains(targetId);
+                return new DropTarget { List = list, IntoContainer = target.Action, IntoTrueBranch = true, Index = list?.Count ?? 0, Hint = DropHint.Into, TargetNode = target, Valid = valid };
+            }
+
+            // 否则按上/下半区插入到 target 所在列表的前/后
+            DropHint hint = (h <= 0 || y < h / 2) ? DropHint.Before : DropHint.After;
+            return BuildSiblingTarget(target, targetId, dragged, subtree, hint);
+        }
+
+        // 构造"插入到 target 所在列表的 前/后"落点
+        private DropTarget BuildSiblingTarget(StepTreeNode target, string targetId, RecordedAction dragged, HashSet<string>? subtree, DropHint hint)
+        {
+            var loc = _recorder.FindNode(targetId);
+            if (loc == null) return new DropTarget { Valid = false };
+            int idx = loc.List.IndexOf(loc.Node);
+            if (hint == DropHint.After) idx++;
+            bool self = targetId == dragged.NodeId;
+            bool cycle = subtree != null && subtree.Contains(targetId);
+            return new DropTarget
+            {
+                List = loc.List,
+                Index = idx,
+                Hint = hint,
+                TargetNode = target,
+                Valid = !self && !cycle
+            };
+        }
+
+        // 光标下最内层 TreeViewItem
+        private static TreeViewItem? GetTreeViewItemAtPoint(ItemsControl ic, Point pt)
+        {
+            var hit = ic.InputHitTest(pt) as DependencyObject;
+            while (hit != null && hit != ic)
+            {
+                if (hit is TreeViewItem tvi) return tvi;
+                hit = VisualTreeHelper.GetParent(hit);
+            }
+            return null;
+        }
+
+        // 命中按钮/勾选框/文本框时不发起拖拽（避免误触行内交互）
+        private static bool IsOverInteractiveControl(object source)
+        {
+            var d = source as DependencyObject;
+            while (d != null)
+            {
+                if (d is Button || d is CheckBox || d is TextBox) return true;
+                if (d is TreeViewItem) break;
+                d = VisualTreeHelper.GetParent(d);
+            }
+            return false;
+        }
+
+        private void SetDropHint(StepTreeNode? node, DropHint hint)
+        {
+            if (_dropHintNode != null && _dropHintNode != node)
+                _dropHintNode.DropHint = DropHint.None;
+            if (node != null) node.DropHint = hint;
+            _dropHintNode = node;
+        }
+
+        private void ClearDropHint()
+        {
+            if (_dropHintNode != null) _dropHintNode.DropHint = DropHint.None;
+            _dropHintNode = null;
+        }
+
+        private static string HintText(DropHint hint) => hint switch
+        {
+            DropHint.Before => "（插到前方）",
+            DropHint.After => "（插到后方）",
+            DropHint.Into => "（放入循环体/分支）",
+            _ => ""
+        };
 
         private async void RunSingleAction_Click(object sender, RoutedEventArgs e)
         {
@@ -2471,6 +2727,162 @@ namespace WeChatAutomation.App
             AppendLog("🌳 路径树抓取已关闭");
         }
 
+        // ═══ 交互式 UIA 树查看器（调试）：点元素 -> 弹交互 TreeView 浏览整窗口 UIA 树 ═══
+        private bool _isUiaTreeCapturing = false;
+        private bool _uiaTreeCaptured = false;   // 已抓取一次，忽略后续点击
+        private IntPtr _uiaTreeHookId = IntPtr.Zero;
+        private User32.LowLevelMouseProc _uiaTreeHookProc;
+        private UIA3Automation _uiaTreeUia;
+        private Window _uiaTreeTopBar;
+        private KeyEventHandler _uiaTreeEscHandler;
+
+        private void UiaTreeBtn_Click(object s, RoutedEventArgs e)
+        {
+            if (_isUiaTreeCapturing) StopUiaTreeCapture(); else StartUiaTreeCapture();
+        }
+
+        private void StartUiaTreeCapture()
+        {
+            if (_isUiaTreeCapturing) return;
+            _isUiaTreeCapturing = true;
+            _uiaTreeCaptured = false;
+            _uiaTreeUia = new UIA3Automation();
+
+            _uiaTreeTopBar = new Window
+            {
+                Title = "UIA 树抓取", Width = 560, Height = 40,
+                WindowStyle = WindowStyle.None, AllowsTransparency = true,
+                Background = new SolidColorBrush(Color.FromArgb(240, 0x4A, 0x14, 0x8C)),
+                Foreground = Brushes.White, ShowInTaskbar = false, Topmost = true,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                IsHitTestVisible = false, Focusable = false
+            };
+            _uiaTreeTopBar.Content = new TextBlock
+            {
+                Text = "🌳 UIA 树抓取 - 点击目标元素，交互式浏览其窗口的 UIA 树 | Esc 取消",
+                FontSize = 12, FontWeight = FontWeights.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+            };
+            _uiaTreeTopBar.Show();
+
+            _uiaTreeHookProc = (int nCode, IntPtr wParam, IntPtr lParam) =>
+            {
+                if (nCode >= 0 && (int)wParam == User32.WM_LBUTTONDOWN && !_uiaTreeCaptured)
+                {
+                    _uiaTreeCaptured = true;
+                    if (_uiaTreeHookId != IntPtr.Zero)
+                    {
+                        User32.UnhookWindowsHookEx(_uiaTreeHookId);
+                        _uiaTreeHookId = IntPtr.Zero;
+                    }
+                    var st = Marshal.PtrToStructure<User32.MSLLHOOKSTRUCT>(lParam);
+                    int x = st.pt.x, y = st.pt.y;
+                    System.Threading.Tasks.Task.Run(() => CaptureAndShowUiaTree(x, y));
+                }
+                return User32.CallNextHookEx(_uiaTreeHookId, nCode, wParam, lParam);
+            };
+
+            using (var cur = System.Diagnostics.Process.GetCurrentProcess())
+            using (var mod = cur.MainModule)
+            {
+                _uiaTreeHookId = User32.SetWindowsHookEx(User32.WH_MOUSE_LL, _uiaTreeHookProc,
+                    User32.GetModuleHandle(mod!.ModuleName), 0);
+            }
+
+            _uiaTreeEscHandler = new KeyEventHandler((s, e) =>
+            {
+                if (e.Key == Key.Escape && _isUiaTreeCapturing) StopUiaTreeCapture();
+            });
+            this.KeyDown += _uiaTreeEscHandler;
+
+            AppendLog("🌳 UIA 树抓取已开启 - 点击目标元素弹出交互式 UIA 树（Esc 取消）");
+        }
+
+        // disposeUia=false 表示 UIA 实例将转交给查看器窗口，不释放
+        private void StopUiaTreeCapture(bool disposeUia = true)
+        {
+            if (!_isUiaTreeCapturing) return;
+            _isUiaTreeCapturing = false;
+
+            if (_uiaTreeHookId != IntPtr.Zero)
+            {
+                User32.UnhookWindowsHookEx(_uiaTreeHookId);
+                _uiaTreeHookId = IntPtr.Zero;
+            }
+            if (_uiaTreeEscHandler != null)
+            {
+                this.KeyDown -= _uiaTreeEscHandler;
+                _uiaTreeEscHandler = null;
+            }
+            try { _uiaTreeTopBar?.Close(); } catch { }
+            _uiaTreeTopBar = null;
+            if (disposeUia)
+            {
+                try { _uiaTreeUia?.Dispose(); } catch { }
+                _uiaTreeUia = null;
+            }
+            AppendLog("🌳 UIA 树抓取已关闭");
+        }
+
+        private void CaptureAndShowUiaTree(int x, int y)
+        {
+            UIA3Automation? uiaRef = null;
+            FlaUI.Core.AutomationElements.AutomationElement? rootEl = null;
+            IntPtr hwndRef = IntPtr.Zero;
+            try
+            {
+                var uia = _uiaTreeUia;
+                if (uia == null) { Dispatcher.BeginInvoke(new Action(() => StopUiaTreeCapture())); return; }
+
+                var element = uia.FromPoint(new System.Drawing.Point(x, y));
+                if (element == null)
+                {
+                    Dispatcher.BeginInvoke(new Action(() => { AppendLog("🌳 未获取到点击位置元素"); StopUiaTreeCapture(); }));
+                    return;
+                }
+
+                // 向上到窗口根
+                var root = element;
+                for (int i = 0; i < 64; i++)
+                {
+                    var parent = root.Parent;
+                    if (parent == null) break;
+                    root = parent;
+                }
+
+                // 取顶层窗口句柄并激活微信 UIA 树（FlaUI 不触发检测，必须先 Activate）
+                hwndRef = User32.GetAncestor(User32.WindowFromPoint(new User32.POINT { x = x, y = y }), User32.GA_ROOT);
+                if (hwndRef == IntPtr.Zero) hwndRef = User32.GetForegroundWindow();
+                if (hwndRef != IntPtr.Zero) UIATreeActivator.Activate(hwndRef);
+
+                uiaRef = uia;
+                rootEl = root;
+            }
+            catch (Exception ex)
+            {
+                Dispatcher.BeginInvoke(new Action(() => { AppendLog($"🌳 抓取异常: {ex.Message}"); StopUiaTreeCapture(); }));
+                return;
+            }
+
+            var rootCopy = rootEl; var uiaCopy = uiaRef; var hwndCopy = hwndRef;
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                StopUiaTreeCapture(disposeUia: false);   // UIA 实例转交查看器，不释放
+                if (rootCopy != null && uiaCopy != null)
+                {
+                    var win = new UiaTreeWindow(uiaCopy, rootCopy, hwndCopy) { Owner = this };
+                    win.Show();
+                    _uiaTreeUia = null;   // 所有权已转移给查看器窗口
+                    AppendLog($"🌳 UIA 树查看器已打开（hwnd 0x{hwndCopy.ToInt64():X}）");
+                }
+                else
+                {
+                    try { uiaCopy?.Dispose(); } catch { }
+                    _uiaTreeUia = null;
+                }
+            }));
+        }
+
         // ═══ 视觉模板截取（F7）══
         // 按 F7 进入截取模式 -> 鼠标点击目标元素 -> 以点击点为中心截取 80×28 模板图存到 templates/，
         // 弹窗显示模板预览和绝对路径（可复制）。用于为视觉模式步骤手动生成模板图片。
@@ -2974,6 +3386,24 @@ namespace WeChatAutomation.App
                     TaskPollingToggleBtn.Content = "开启";
                     TaskPollingToggleBtn.Background = _toggleOffBrush;
                     TaskPollingToggleBtn.Foreground = Brushes.White;
+                }
+
+                // 本地调度状态
+                if (App.LocalScheduler?.IsRunning == true)
+                {
+                    AnimateStatusDot(SchedulerStatusDot, _statusOnBrush);
+                    UpdateSchedulerStatusText();
+                    SchedulerToggleBtn.Content = "关闭";
+                    SchedulerToggleBtn.Background = _toggleOnBrush;
+                    SchedulerToggleBtn.Foreground = Brushes.White;
+                }
+                else
+                {
+                    AnimateStatusDot(SchedulerStatusDot, _statusOffBrush);
+                    SchedulerStatusText.Text = App.LocalScheduler == null ? "(未启动)" : "(已停止)";
+                    SchedulerToggleBtn.Content = "开启";
+                    SchedulerToggleBtn.Background = _toggleOffBrush;
+                    SchedulerToggleBtn.Foreground = Brushes.White;
                 }
             }
             catch (Exception ex)
@@ -4511,6 +4941,372 @@ namespace WeChatAutomation.App
             return result;
         }
 
+        // ═══ 本地定时调度 ═══
+
+        private ObservableCollection<ScheduleDisplayItem> _scheduleItems;
+        private Window _scheduleDialog;
+
+        private async void SchedulerToggle_Click(object s, RoutedEventArgs e)
+        {
+            try
+            {
+                if (App.LocalScheduler == null) return;
+                if (App.LocalScheduler.IsRunning)
+                {
+                    await App.LocalScheduler.StopAsync(CancellationToken.None);
+                    AppendLog("本地调度服务已停止");
+                }
+                else
+                {
+                    await App.LocalScheduler.StartManual(CancellationToken.None);
+                    AppendLog(App.LocalScheduler.IsRunning ? "本地调度服务已启动" : "本地调度服务启动失败");
+                }
+                UpdateServiceStatus();
+            }
+            catch (Exception ex) { AppendLog($"调度服务切换失败: {ex.Message}"); }
+        }
+
+        private void SchedulerConfig_Click(object s, RoutedEventArgs e) => OpenScheduleManager();
+
+        private void UpdateSchedulerStatusText()
+        {
+            var sched = App.LocalScheduler;
+            if (sched == null) return;
+            int enabled = sched.EnabledCount, total = sched.TotalCount;
+            SchedulerStatusText.Text = total > 0 ? $"运行中 {enabled}/{total}" : "运行中";
+        }
+
+        public void RefreshSchedules()
+        {
+            var sched = App.LocalScheduler;
+            if (sched == null) return;
+            if (sched.IsRunning) UpdateSchedulerStatusText();
+            if (_scheduleItems != null)
+            {
+                var list = sched.GetSchedules();
+                _scheduleItems.Clear();
+                foreach (var s in list.OrderBy(x => x.Enabled ? 0 : 1).ThenBy(x => x.NextRunAt ?? DateTime.MaxValue))
+                    _scheduleItems.Add(BuildScheduleDisplay(s));
+            }
+        }
+
+        private static ScheduleDisplayItem BuildScheduleDisplay(ScheduleItem s)
+        {
+            string lastIcon = s.LastRunStatus switch { "completed" => "✅", "failed" => "❌", "skipped" => "⏭", _ => "" };
+            return new ScheduleDisplayItem
+            {
+                Id = s.Id,
+                Name = string.IsNullOrEmpty(s.Name) ? s.ScriptName : s.Name,
+                ScriptName = s.ScriptName,
+                TriggerSummary = s.TriggerSummary,
+                Enabled = s.Enabled,
+                EnabledText = s.Enabled ? "✅ 启用" : "⬜ 禁用",
+                NextRunText = s.NextRunAt?.ToString("MM-dd HH:mm") ?? "—",
+                LastRunText = s.LastRunAt.HasValue ? $"{s.LastRunAt:MM-dd HH:mm} {lastIcon}" : "未运行"
+            };
+        }
+
+        /// <summary>定时任务管理对话框（列表 + 新建/编辑/删除/启用切换）。</summary>
+        private void OpenScheduleManager()
+        {
+            if (_scheduleDialog != null) { _scheduleDialog.Activate(); return; }
+
+            _scheduleItems = new ObservableCollection<ScheduleDisplayItem>();
+            RefreshSchedules();
+
+            var w = new Window
+            {
+                Title = "定时任务管理",
+                Width = 760, Height = 460,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this, ResizeMode = ResizeMode.CanResize
+            };
+            _scheduleDialog = w;
+
+            var grid = new Grid { Margin = new Thickness(10) };
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+            // 工具栏
+            var tb = new WrapPanel { Margin = new Thickness(0, 0, 0, 8) };
+            var btnNew = new Button { Content = "＋ 新建", Padding = new Thickness(10, 4, 10, 4), Margin = new Thickness(0, 0, 4, 0) };
+            var btnEdit = new Button { Content = "✏ 编辑", Padding = new Thickness(10, 4, 10, 4), Margin = new Thickness(0, 0, 4, 0) };
+            var btnToggle = new Button { Content = "⏯ 启用切换", Padding = new Thickness(10, 4, 10, 4), Margin = new Thickness(0, 0, 4, 0) };
+            var btnDelete = new Button { Content = "🗑 删除", Padding = new Thickness(10, 4, 10, 4), Margin = new Thickness(0, 0, 4, 0), Foreground = Brushes.IndianRed };
+            var btnRefresh = new Button { Content = "🔄 刷新", Padding = new Thickness(10, 4, 10, 4), Margin = new Thickness(0, 0, 4, 0) };
+            var btnClose = new Button { Content = "关闭", Padding = new Thickness(10, 4, 10, 4) };
+            tb.Children.Add(btnNew); tb.Children.Add(btnEdit); tb.Children.Add(btnToggle);
+            tb.Children.Add(btnDelete); tb.Children.Add(btnRefresh); tb.Children.Add(btnClose);
+            grid.Children.Add(tb); Grid.SetRow(tb, 0);
+
+            // 列表
+            var lv = new ListView { ItemsSource = _scheduleItems, FontSize = 11 };
+            var gv = new GridView();
+            void AddCol(string header, string field, double width)
+                => gv.Columns.Add(new GridViewColumn { Header = header, Width = width, DisplayMemberBinding = new System.Windows.Data.Binding(field) });
+            AddCol("名称", nameof(ScheduleDisplayItem.Name), 130);
+            AddCol("脚本", nameof(ScheduleDisplayItem.ScriptName), 110);
+            AddCol("触发", nameof(ScheduleDisplayItem.TriggerSummary), 160);
+            AddCol("状态", nameof(ScheduleDisplayItem.EnabledText), 70);
+            AddCol("下次执行", nameof(ScheduleDisplayItem.NextRunText), 100);
+            AddCol("上次执行", nameof(ScheduleDisplayItem.LastRunText), 130);
+            lv.View = gv;
+            lv.MouseDoubleClick += (_, _) =>
+            {
+                if (lv.SelectedItem is ScheduleDisplayItem it) EditSchedule(it.Id);
+            };
+            grid.Children.Add(lv); Grid.SetRow(lv, 1);
+
+            btnNew.Click += (_, _) => EditSchedule(null);
+            btnEdit.Click += (_, _) => { if (lv.SelectedItem is ScheduleDisplayItem it) EditSchedule(it.Id); else MessageBox.Show("请先选择一个任务"); };
+            btnToggle.Click += (_, _) =>
+            {
+                if (lv.SelectedItem is ScheduleDisplayItem it) App.LocalScheduler?.SetEnabled(it.Id, !it.Enabled);
+                else MessageBox.Show("请先选择一个任务");
+            };
+            btnDelete.Click += (_, _) =>
+            {
+                if (lv.SelectedItem is ScheduleDisplayItem it)
+                {
+                    if (MessageBox.Show($"确认删除「{it.Name}」？", "确认", MessageBoxButton.OKCancel) == MessageBoxResult.OK)
+                        App.LocalScheduler?.DeleteSchedule(it.Id);
+                }
+                else MessageBox.Show("请先选择一个任务");
+            };
+            btnRefresh.Click += (_, _) => RefreshSchedules();
+            btnClose.Click += (_, _) => w.Close();
+
+            w.Content = grid;
+            w.Closed += (_, _) => { _scheduleDialog = null; _scheduleItems = null; };
+            w.Show();
+        }
+
+        /// <summary>新建或编辑调度（existingId=null 为新建）。</summary>
+        private void EditSchedule(string existingId)
+        {
+            var sched = App.LocalScheduler;
+            if (sched == null) { MessageBox.Show("调度服务未就绪"); return; }
+
+            var scripts = App.ScriptExecutor?.GetAvailableScripts();
+            if (scripts == null || scripts.Count == 0) { MessageBox.Show("没有可用脚本，请先录制并保存脚本"); return; }
+
+            ScheduleItem existing = existingId != null ? sched.GetSchedules().FirstOrDefault(s => s.Id == existingId) : null;
+
+            var w = new Window
+            {
+                Title = existing == null ? "新建定时任务" : $"编辑 - {existing.Name}",
+                Width = 460, SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this, ResizeMode = ResizeMode.NoResize
+            };
+            var sp = new StackPanel { Margin = new Thickness(15) };
+
+            // 名称
+            sp.Children.Add(new TextBlock { Text = "名称:", Margin = new Thickness(0, 0, 0, 3) });
+            var nameBox = new TextBox { Text = existing?.Name ?? "", Margin = new Thickness(0, 0, 0, 8) };
+            sp.Children.Add(nameBox);
+
+            // 脚本
+            sp.Children.Add(new TextBlock { Text = "脚本:", Margin = new Thickness(0, 0, 0, 3) });
+            var scriptCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8) };
+            foreach (var sc in scripts) scriptCombo.Items.Add(sc.Name);
+            if (existing != null && scripts.Any(s => s.Name == existing.ScriptName)) scriptCombo.SelectedItem = existing.ScriptName;
+            else scriptCombo.SelectedIndex = 0;
+            sp.Children.Add(scriptCombo);
+
+            // 参数（随脚本选择动态重建）
+            var paramHeader = new TextBlock { Text = "参数:", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 4, 0, 3) };
+            sp.Children.Add(paramHeader);
+            var paramPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            sp.Children.Add(paramPanel);
+            var paramInputs = new Dictionary<string, TextBox>();
+
+            void RebuildParams()
+            {
+                paramPanel.Children.Clear();
+                paramInputs.Clear();
+                var sel = scriptCombo.SelectedItem as string;
+                if (string.IsNullOrEmpty(sel)) { paramPanel.Children.Add(new TextBlock { Text = "(未选择脚本)", Foreground = Brushes.Gray, FontSize = 10 }); return; }
+                var rec = App.ScriptExecutor.GetScriptInfo(sel);
+                if (rec?.Parameters == null || rec.Parameters.Count == 0)
+                {
+                    paramPanel.Children.Add(new TextBlock { Text = "(该脚本无参数)", Foreground = Brushes.Gray, FontSize = 10 });
+                    return;
+                }
+                foreach (var p in rec.Parameters)
+                {
+                    paramPanel.Children.Add(new TextBlock
+                    {
+                        Text = $"{(string.IsNullOrEmpty(p.DisplayName) ? p.Name : p.DisplayName)}{(p.IsRequired ? " *" : "")}:",
+                        Margin = new Thickness(0, 4, 0, 2),
+                        FontSize = 11
+                    });
+                    var tb = new TextBox { Margin = new Thickness(0, 0, 0, 2), FontSize = 11 };
+                    string val = "";
+                    if (existing?.Parameters != null && existing.Parameters.TryGetValue(p.Name, out var ev)) val = ev;
+                    else val = p.DefaultValue ?? "";
+                    tb.Text = val;
+                    paramInputs[p.Name] = tb;
+                    paramPanel.Children.Add(tb);
+                }
+            }
+            scriptCombo.SelectionChanged += (_, _) => RebuildParams();
+            RebuildParams();
+
+            // 触发方式
+            sp.Children.Add(new TextBlock { Text = "触发方式:", Margin = new Thickness(0, 0, 0, 3) });
+            var triggerCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 8) };
+            triggerCombo.Items.Add("定时一次"); triggerCombo.Items.Add("每隔"); triggerCombo.Items.Add("每天"); triggerCombo.Items.Add("每周");
+            triggerCombo.SelectedIndex = existing != null ? (int)existing.TriggerType : (int)ScheduleTriggerType.Daily;
+            sp.Children.Add(triggerCombo);
+
+            // —— 各触发参数面板 ——
+            // 一次
+            var oncePanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            oncePanel.Children.Add(new TextBlock { Text = "日期:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var datePicker = new DatePicker { SelectedDate = existing?.OnceAt.Date ?? DateTime.Today, Width = 130 };
+            oncePanel.Children.Add(datePicker);
+            oncePanel.Children.Add(new TextBlock { Text = "时间:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 5, 0) });
+            var onceTimeBox = new TextBox { Text = (existing?.OnceAt ?? DateTime.Now).ToString("HH:mm"), Width = 60 };
+            oncePanel.Children.Add(onceTimeBox);
+            sp.Children.Add(oncePanel);
+
+            // 每隔
+            var intervalPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            intervalPanel.Children.Add(new TextBlock { Text = "每", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var intervalBox = new TextBox { Width = 60 };
+            var intervalUnit = new ComboBox { Width = 70, Margin = new Thickness(5, 0, 0, 0) };
+            intervalUnit.Items.Add("秒"); intervalUnit.Items.Add("分"); intervalUnit.Items.Add("时");
+            int existSecs = existing?.IntervalSeconds ?? 1800;
+            if (existSecs >= 3600 && existSecs % 3600 == 0) { intervalBox.Text = (existSecs / 3600).ToString(); intervalUnit.SelectedIndex = 2; }
+            else if (existSecs >= 60 && existSecs % 60 == 0) { intervalBox.Text = (existSecs / 60).ToString(); intervalUnit.SelectedIndex = 1; }
+            else { intervalBox.Text = existSecs.ToString(); intervalUnit.SelectedIndex = 0; }
+            intervalPanel.Children.Add(intervalBox);
+            intervalPanel.Children.Add(intervalUnit);
+            intervalPanel.Children.Add(new TextBlock { Text = "执行一次", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(5, 0, 0, 0) });
+            sp.Children.Add(intervalPanel);
+
+            // 每天
+            var dailyPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            dailyPanel.Children.Add(new TextBlock { Text = "每天时间(HH:mm):", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var dailyTimeBox = new TextBox { Text = existing?.DailyTime ?? "09:00", Width = 70 };
+            dailyPanel.Children.Add(dailyTimeBox);
+            sp.Children.Add(dailyPanel);
+
+            // 每周
+            var weeklyPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            var wpRow = new StackPanel { Orientation = Orientation.Horizontal };
+            wpRow.Children.Add(new TextBlock { Text = "每周:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var dayLabels = new[] { "一", "二", "三", "四", "五", "六", "日" };
+            var dayChecks = new CheckBox[7];
+            for (int i = 0; i < 7; i++)
+            {
+                var cb = new CheckBox { Content = dayLabels[i], Margin = new Thickness(0, 0, 6, 0), Tag = i + 1 };
+                if (existing?.WeeklyDays?.Contains(i + 1) == true) cb.IsChecked = true;
+                else if (existing == null && i == 0) cb.IsChecked = true; // 新建默认周一
+                dayChecks[i] = cb;
+                wpRow.Children.Add(cb);
+            }
+            weeklyPanel.Children.Add(wpRow);
+            var wpTime = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+            wpTime.Children.Add(new TextBlock { Text = "时间(HH:mm):", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var weeklyTimeBox = new TextBox { Text = existing?.WeeklyTime ?? "09:00", Width = 70 };
+            wpTime.Children.Add(weeklyTimeBox);
+            weeklyPanel.Children.Add(wpTime);
+            sp.Children.Add(weeklyPanel);
+
+            // 提示
+            sp.Children.Add(new TextBlock { Text = "* 云端任务到达时会自动停止正在执行的本地定时任务", Foreground = Brushes.Gray, FontSize = 10, Margin = new Thickness(0, 4, 0, 8), TextWrapping = TextWrapping.Wrap });
+
+            // 显隐
+            void ShowTrigger()
+            {
+                int idx = triggerCombo.SelectedIndex;
+                oncePanel.Visibility = idx == 0 ? Visibility.Visible : Visibility.Collapsed;
+                intervalPanel.Visibility = idx == 1 ? Visibility.Visible : Visibility.Collapsed;
+                dailyPanel.Visibility = idx == 2 ? Visibility.Visible : Visibility.Collapsed;
+                weeklyPanel.Visibility = idx == 3 ? Visibility.Visible : Visibility.Collapsed;
+            }
+            triggerCombo.SelectionChanged += (_, _) => ShowTrigger();
+            ShowTrigger();
+
+            // 按钮
+            var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
+            var ok = new Button { Content = "保存", IsDefault = true, Padding = new Thickness(15, 5, 15, 5), FontWeight = FontWeights.Bold };
+            var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(8, 0, 0, 0) };
+            bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
+
+            w.Content = sp;
+
+            ok.Click += (_, _) =>
+            {
+                var scriptName = scriptCombo.SelectedItem as string;
+                if (string.IsNullOrEmpty(scriptName)) { MessageBox.Show("请选择脚本"); return; }
+
+                var item = new ScheduleItem
+                {
+                    Id = existing?.Id,
+                    Name = string.IsNullOrWhiteSpace(nameBox.Text) ? scriptName : nameBox.Text.Trim(),
+                    ScriptName = scriptName,
+                    Enabled = existing?.Enabled ?? true,
+                    CreatedAt = existing?.CreatedAt ?? DateTime.Now,
+                    TriggerType = (ScheduleTriggerType)triggerCombo.SelectedIndex
+                };
+
+                // 收集参数
+                item.Parameters = new Dictionary<string, string>();
+                foreach (var kvp in paramInputs)
+                    if (!string.IsNullOrWhiteSpace(kvp.Value.Text)) item.Parameters[kvp.Key] = kvp.Value.Text;
+
+                // 触发参数
+                switch (item.TriggerType)
+                {
+                    case ScheduleTriggerType.Once:
+                        if (!datePicker.SelectedDate.HasValue) { MessageBox.Show("请选择日期"); return; }
+                        var ot = ParseTimeBox(onceTimeBox.Text);
+                        if (ot == null) { MessageBox.Show("时间格式应为 HH:mm"); return; }
+                        item.OnceAt = datePicker.SelectedDate.Value.Date.Add(ot.Value);
+                        if (item.OnceAt < DateTime.Now) { MessageBox.Show("定时时刻已过去"); return; }
+                        break;
+                    case ScheduleTriggerType.Interval:
+                        if (!int.TryParse(intervalBox.Text, out int iv) || iv <= 0) { MessageBox.Show("间隔应为正整数"); return; }
+                        int mult = intervalUnit.SelectedIndex == 2 ? 3600 : intervalUnit.SelectedIndex == 1 ? 60 : 1;
+                        item.IntervalSeconds = iv * mult;
+                        break;
+                    case ScheduleTriggerType.Daily:
+                        var dt = ParseTimeBox(dailyTimeBox.Text);
+                        if (dt == null) { MessageBox.Show("时间格式应为 HH:mm"); return; }
+                        item.DailyTime = dailyTimeBox.Text.Trim();
+                        break;
+                    case ScheduleTriggerType.Weekly:
+                        var wt = ParseTimeBox(weeklyTimeBox.Text);
+                        if (wt == null) { MessageBox.Show("时间格式应为 HH:mm"); return; }
+                        item.WeeklyTime = weeklyTimeBox.Text.Trim();
+                        item.WeeklyDays = dayChecks.Where(c => c.IsChecked == true).Select(c => (int)c.Tag).ToList();
+                        if (item.WeeklyDays.Count == 0) { MessageBox.Show("请至少选择一个星期"); return; }
+                        break;
+                }
+
+                sched.AddOrUpdateSchedule(item);
+                w.DialogResult = true;
+            };
+
+            if (w.ShowDialog() == true)
+            {
+                RefreshSchedules();
+                AppendLog(existing == null ? $"已新建定时任务: {nameBox.Text}" : $"已更新定时任务: {nameBox.Text}");
+            }
+        }
+
+        private static TimeSpan? ParseTimeBox(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            var p = text.Split(':', StringSplitOptions.RemoveEmptyEntries);
+            if (p.Length >= 2 && int.TryParse(p[0], out int h) && int.TryParse(p[1], out int m) && h >= 0 && h < 24 && m >= 0 && m < 60)
+                return new TimeSpan(h, m, 0);
+            return null;
+        }
+
         // ═══ YOLO 训练向导（已移除：视觉模式改用 OpenCV 模板匹配，无需训练） ═══
     }
 
@@ -4531,5 +5327,17 @@ namespace WeChatAutomation.App
         public string DisplayText { get; set; }
         public string DetailText { get; set; }
         public string DurationText { get; set; }
+    }
+
+    public class ScheduleDisplayItem
+    {
+        public string Id { get; set; }
+        public string Name { get; set; }
+        public string ScriptName { get; set; }
+        public string TriggerSummary { get; set; }
+        public bool Enabled { get; set; }
+        public string EnabledText { get; set; }
+        public string NextRunText { get; set; }
+        public string LastRunText { get; set; }
     }
 }

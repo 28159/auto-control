@@ -5,6 +5,9 @@ using WeChatAutomation.Core.Recording;
 
 namespace WeChatAutomation.App
 {
+    /// <summary>拖放落点提示（驱动模板内指示线/高亮）。</summary>
+    public enum DropHint { None, Before, After, Into }
+
     /// <summary>
     /// TreeView 节点包装类，用于在 MainWindow 的步骤列表中显示层级结构。
     /// If 步骤的 True/False 分支作为子节点展示。
@@ -56,6 +59,15 @@ namespace WeChatAutomation.App
         {
             get => _isRowSelected;
             set { if (_isRowSelected != value) { _isRowSelected = value; OnPropertyChanged(nameof(IsRowSelected)); } }
+        }
+
+        private DropHint _dropHint = DropHint.None;
+
+        /// <summary>拖放落点提示（仅拖拽期间由 DragOver 设置，驱动指示线/高亮）。</summary>
+        public DropHint DropHint
+        {
+            get => _dropHint;
+            set { if (_dropHint != value) { _dropHint = value; OnPropertyChanged(nameof(DropHint)); } }
         }
 
         // ── 表格列显示属性 ──
