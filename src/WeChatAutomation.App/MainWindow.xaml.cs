@@ -93,7 +93,7 @@ namespace WeChatAutomation.App
             _hotkeyHook.StartCapture();
 
             LoadScriptsList();
-            AppendLog("F9录制 F10确认 F11回放 F12检查 | 双击步骤可编辑");
+            AppendLog("F5回放 F9录制 F10确认 F12检查 | 双击步骤可编辑");
             UpdateClickModeUI();
 
             // 初始化服务状态显示
@@ -109,7 +109,8 @@ namespace WeChatAutomation.App
         private bool _isInspecting = false; // 窗口检查模式状态
         private void OnHotKey(int vk)
         {
-            if (vk == User32.VK_F9) { if (_recorder.IsRecording) StopRecording(); else StartRecording(); }
+            if (vk == User32.VK_F5) { if (_player.IsPlaying) _player.Stop(); else _ = PlayAll(); }
+            else if (vk == User32.VK_F9) { if (_recorder.IsRecording) StopRecording(); else StartRecording(); }
             else if (vk == User32.VK_F10) _recorder.ConfirmStep();
             else if (vk == User32.VK_F11) { if (_player.IsPlaying) _player.Stop(); else _ = PlayAll(); }
             else if (vk == User32.VK_F12) { if (_isInspecting) StopInspect(); else StartInspect(); }
@@ -190,6 +191,7 @@ namespace WeChatAutomation.App
         }
         private void AddCopy_Click(object s, RoutedEventArgs e) => AddOrRun(ActionType.Copy, name: "复制");
         private void AddPaste_Click(object s, RoutedEventArgs e) => AddOrRun(ActionType.Paste, name: "粘贴");
+        private void AddClearText_Click(object s, RoutedEventArgs e) => AddOrRun(ActionType.ClearText, name: "清空文本");
 
         // ═══ 新增步骤（任意可用） ═══
         private void AddWait_Click(object s, RoutedEventArgs e)
@@ -669,11 +671,12 @@ namespace WeChatAutomation.App
             var w = new Window
             {
                 Title = $"编辑步骤 #{node.Order}",
-                Width = 400, SizeToContent = SizeToContent.Height,
+                Width = 400, Height = 600,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                Owner = this, ResizeMode = ResizeMode.NoResize
+                Owner = this, ResizeMode = ResizeMode.CanResize
             };
 
+            var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
             var sp = new StackPanel { Margin = new Thickness(15) };
 
             sp.Children.Add(new TextBlock { Text = "类型:", Margin = new Thickness(0, 0, 0, 3) });
@@ -937,7 +940,8 @@ namespace WeChatAutomation.App
             var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(8, 0, 0, 0) };
             bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
 
-            w.Content = sp;
+            scroll.Content = sp;
+            w.Content = scroll;
 
             ok.Click += (_, _) =>
             {
@@ -3163,8 +3167,90 @@ namespace WeChatAutomation.App
                 Text = "示例: {last_click_success} == true   {found} == true   {count} > 0   {content} contains '已添加'   {text} matches '\\d+'",
                 FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 3), TextWrapping = TextWrapping.Wrap
             });
-            var exprBox = new TextBox { Text = isNew ? "" : node.ConditionExpression ?? "", Margin = new Thickness(0, 0, 0, 10), ToolTip = "判断条件，支持 == != > < >= <= contains matches。留空则按上方'判断来源变量'是否有值判断" };
+            var exprBox = new TextBox { Text = isNew ? "" : node.ConditionExpression ?? "", Margin = new Thickness(0, 0, 0, 6), ToolTip = "判断条件，支持 == != > < >= <= contains matches。留空则按上方'判断来源变量'是否有值判断" };
             sp.Children.Add(exprBox);
+
+            // ── 可视化条件构建器（自动同步到上方表达式） ──
+            sp.Children.Add(new TextBlock { Text = "── 或用可视化配置（自动生成表达式）──", FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 4, 0, 4) });
+            var visRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            // 运算符下拉
+            var opCombo = new ComboBox { Width = 120, Margin = new Thickness(0, 0, 6, 0), ToolTip = "选择比较运算符" };
+            var ops = new[] { "包含 contains", "等于 ==", "不等于 !=", "大于 >", "小于 <", "大于等于 >=", "小于等于 <=", "正则 matches", "有值 (truthy)" };
+            foreach (var op in ops) opCombo.Items.Add(op);
+            opCombo.SelectedIndex = 0;
+            visRow.Children.Add(opCombo);
+            // 比较值
+            var valueBox = new TextBox { Width = 160, ToolTip = "比较值，字符串可加引号也可不加" };
+            visRow.Children.Add(valueBox);
+            sp.Children.Add(visRow);
+            // 应用按钮
+            var applyBtn = new Button { Content = "生成表达式", Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(0, 0, 0, 8), HorizontalAlignment = HorizontalAlignment.Left };
+            sp.Children.Add(applyBtn);
+
+            // 根据当前表达式预填可视化配置
+            void ParseExprToVisual()
+            {
+                string e = exprBox.Text.Trim();
+                if (string.IsNullOrEmpty(e))
+                {
+                    opCombo.SelectedIndex = 8; // 有值
+                    valueBox.Text = "";
+                    return;
+                }
+                if (e.Contains(" contains "))
+                {
+                    opCombo.SelectedIndex = 0;
+                    var parts = e.Split(new[] { " contains " }, 2, StringSplitOptions.None);
+                    valueBox.Text = parts.Length > 1 ? parts[1].Trim().Trim('\'', '"') : "";
+                }
+                else if (e.Contains(" matches "))
+                {
+                    opCombo.SelectedIndex = 7;
+                    var parts = e.Split(new[] { " matches " }, 2, StringSplitOptions.None);
+                    valueBox.Text = parts.Length > 1 ? parts[1].Trim().Trim('\'', '"') : "";
+                }
+                else if (e.Contains("==") || e.Contains("!=") || e.Contains(">=") || e.Contains("<=") || e.Contains(">") || e.Contains("<"))
+                {
+                    string opSym = e.Contains(">=") ? ">=" : e.Contains("<=") ? "<=" : e.Contains("==") ? "==" : e.Contains("!=") ? "!=" : e.Contains(">") ? ">" : "<";
+                    int idx = opSym == "==" ? 1 : opSym == "!=" ? 2 : opSym == ">" ? 3 : opSym == "<" ? 4 : opSym == ">=" ? 5 : 6;
+                    opCombo.SelectedIndex = idx;
+                    var parts = e.Split(new[] { opSym }, 2, StringSplitOptions.None);
+                    valueBox.Text = parts.Length > 1 ? parts[1].Trim().Trim('\'', '"') : "";
+                }
+                else
+                {
+                    opCombo.SelectedIndex = 8; // 有值
+                    valueBox.Text = "";
+                }
+            }
+            ParseExprToVisual();
+
+            // 点击"生成表达式"：根据可视化配置生成条件表达式
+            applyBtn.Click += (_, _) =>
+            {
+                string sourceVar2 = sourceVarCombo.SelectedIndex > 0
+                    ? (sourceVarCombo.SelectedItem as string ?? sourceVarCombo.Text.Trim())
+                    : sourceVarCombo.Text.Trim();
+                if (sourceVar2 == "(无)") sourceVar2 = "";
+                string varPart = string.IsNullOrEmpty(sourceVar2) ? "" : $"{{{sourceVar2}}}";
+                string opSel = opCombo.SelectedItem?.ToString() ?? "";
+                string val = valueBox.Text.Trim();
+
+                string newExpr = opSel switch
+                {
+                    "包含 contains" => $"{varPart} contains '{val}'",
+                    "等于 ==" => $"{varPart} == {(val.Equals("true", StringComparison.OrdinalIgnoreCase) || val.Equals("false", StringComparison.OrdinalIgnoreCase) || double.TryParse(val, out _) ? val : $"'{val}'")}",
+                    "不等于 !=" => $"{varPart} != {(val.Equals("true", StringComparison.OrdinalIgnoreCase) || val.Equals("false", StringComparison.OrdinalIgnoreCase) || double.TryParse(val, out _) ? val : $"'{val}'")}",
+                    "大于 >" => $"{varPart} > {val}",
+                    "小于 <" => $"{varPart} < {val}",
+                    "大于等于 >=" => $"{varPart} >= {val}",
+                    "小于等于 <=" => $"{varPart} <= {val}",
+                    "正则 matches" => $"{varPart} matches '{val}'",
+                    "有值 (truthy)" => varPart,
+                    _ => exprBox.Text
+                };
+                exprBox.Text = newExpr;
+            };
 
             // ── 条件成立时行为 ──
             sp.Children.Add(new Border

@@ -34,6 +34,7 @@ namespace WeChatAutomation.Core.Native
         public bool IsCapturing => _isCapturing;
 
         // 热键 VK 码
+        public const int VK_F5 = 0x74;
         public const int VK_F8 = 0x77;
         public const int VK_F9 = 0x78;
         public const int VK_F10 = 0x79;
@@ -70,8 +71,8 @@ namespace WeChatAutomation.Core.Native
                 bool isDown = (int)wParam == User32.WM_KEYDOWN;
                 bool isUp = (int)wParam == User32.WM_KEYUP;
 
-                // 热键检测（F8/F9/F10/F11/F12）
-                if (isDown && (vk == VK_F8 || vk == VK_F9 || vk == VK_F10 || vk == VK_F11 || vk == VK_F12))
+                // 热键检测（F5/F8/F9/F10/F11/F12）
+                if (isDown && (vk == VK_F5 || vk == VK_F8 || vk == VK_F9 || vk == VK_F10 || vk == VK_F11 || vk == VK_F12))
                 {
                     HotKeyPressed?.Invoke(this, vk);
                     goto next;

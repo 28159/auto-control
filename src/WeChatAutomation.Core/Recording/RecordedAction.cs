@@ -14,6 +14,8 @@ namespace WeChatAutomation.Core.Recording
         Copy,
         Paste,
         InsertText,
+        /// <summary>清空当前焦点输入框/文本内容（Ctrl+A 全选后删除）。</summary>
+        ClearText,
         Screenshot,
         OpenApp,
         WaitForApp,
@@ -212,6 +214,7 @@ namespace WeChatAutomation.Core.Recording
             ActionType.Copy => "复制 (Ctrl+C)",
             ActionType.Paste => "粘贴 (Ctrl+V)",
             ActionType.InsertText => $"插入 \"{Trunc(Parameter, 30)}\"",
+            ActionType.ClearText => "清空文本 (Ctrl+A+Del)",
             ActionType.Screenshot => "截图",
             ActionType.OpenApp => $"打开 {Trunc(Parameter, 40)}",
             ActionType.WaitForApp => $"等待应用 {Trunc(Parameter, 25)} ({DelayMs}ms超时)",

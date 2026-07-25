@@ -258,6 +258,8 @@ namespace WeChatAutomation.Core.Logging
         {
             lock (_lock)
             {
+                // 确保控制台输出使用 UTF-8 编码，解决中文乱码
+                try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
                 var originalColor = Console.ForegroundColor;
                 Console.ForegroundColor = GetColor(entry.Level);
                 Console.WriteLine(entry.ToString());

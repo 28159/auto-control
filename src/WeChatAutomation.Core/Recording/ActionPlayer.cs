@@ -180,6 +180,12 @@ namespace WeChatAutomation.Core.Recording
             _totalIterations = 0;
             OnLog($"开始回放，共 {nodes.Count} 步" +
                   (string.IsNullOrEmpty(visionModelFileName) ? "" : $"（视觉模型: {visionModelFileName}）"));
+            // 输出每个步骤的随机行为配置（便于调试）
+            foreach (var n in nodes)
+            {
+                if (n.RandomWaitEnabled || n.RandomMouseMoveEnabled)
+                    OnLog($"  步骤#{n.Order} {n.ActionType}: 随机等待={n.RandomWaitEnabled}({n.RandomWaitMinSec}~{n.RandomWaitMaxSec}秒) 鼠标移动={n.RandomMouseMoveEnabled}({n.RandomMoveMinOffset}~{n.RandomMoveMaxOffset}px)");
+            }
 
             try
             {
@@ -191,7 +197,30 @@ namespace WeChatAutomation.Core.Recording
                     OnLog($"回放达到最大迭代次数 ({MaxTotalIterations})，可能存在死循环，已中止");
 
                 if (!_cts.IsCancellationRequested && !_stopRequested && _totalIterations < MaxTotalIterations)
-                { OnLog("回放完成"); PlayCompleted?.Invoke(this, EventArgs.Empty); }
+                {
+                    OnLog("═══ 回放完成 ═══");
+                    // 输出执行结果摘要
+                    if (_readResults.Count > 0)
+                    {
+                        OnLog($"  阅读结果: {_readResults.Count} 次");
+                        foreach (var r in _readResults)
+                        {
+                            string preview = r.Content.Length > 200 ? r.Content[..200] + "..." : r.Content;
+                            OnLog($"    [{r.WindowTitle}] ({r.Content.Length}字) {preview}");
+                        }
+                    }
+                    if (_variables.Count > 0)
+                    {
+                        OnLog($"  变量值:");
+                        foreach (var v in _variables)
+                        {
+                            string preview = v.Value.Length > 100 ? v.Value[..100] + "..." : v.Value;
+                            OnLog($"    {{{v.Key}}} = {preview}");
+                        }
+                    }
+                    OnLog($"  总步骤迭代: {_totalIterations}");
+                    PlayCompleted?.Invoke(this, EventArgs.Empty);
+                }
             }
             catch (OperationCanceledException) { OnLog("回放已取消"); }
             catch (Exception ex) { OnLog($"回放异常: {ex.Message}"); PlayError?.Invoke(this, ex.Message); }
@@ -232,8 +261,14 @@ namespace WeChatAutomation.Core.Recording
                     OnLog($"步骤后随机等待 {minSec}~{maxSec}秒，本次 {sec}秒");
                     await Task.Delay(sec * 1000, _cts.Token);
                 }
+                else if (node.DelayMs > 0)
+                {
+                    // 随机等待未启用但有 DelayMs，也输出日志确认延迟生效
+                    // (DelayMs 已在上方执行，此处仅为日志)
+                }
                 if (node.RandomMouseMoveEnabled)
                 {
+                    OnLog($"步骤后鼠标随机移动 ({node.RandomMoveMinOffset}~{node.RandomMoveMaxOffset}px)");
                     await RandomMouseWander(node.RandomMoveMinOffset, node.RandomMoveMaxOffset);
                 }
                 currentIndex = jumpTo.HasValue ? jumpTo.Value : currentIndex + 1;
@@ -330,6 +365,16 @@ namespace WeChatAutomation.Core.Recording
                     OnLog($"插入 \"{Trunc(resolvedNode.Parameter, 20)}\"");
                     break;
 
+                case ActionType.ClearText:
+                    {
+                        // Ctrl+A 全选，然后 Delete 删除
+                        await _simulator.KeyComboAsync(User32.VK_CONTROL, User32.VK_A);
+                        await Task.Delay(50, _cts.Token);
+                        await _simulator.KeyComboAsync(User32.VK_DELETE);
+                        OnLog("清空文本 (Ctrl+A + Delete)");
+                        break;
+                    }
+
                 case ActionType.Screenshot:
                     DoScreenshot();
                     OnLog("截图");
@@ -380,6 +425,18 @@ namespace WeChatAutomation.Core.Recording
                     {
                         // 便捷模式：条件表达式为空但设置了 OutputParamName，直接判断该变量（阅读/正则内容）是否有值
                         string? ifExpr = resolvedNode.ConditionExpression;
+                        // 打印当前所有变量值，便于调试判断逻辑
+                        if (_variables.Count > 0)
+                        {
+                            OnLog($"  [判断上下文] 当前变量:");
+                            foreach (var v in _variables)
+                                OnLog($"    {{{v.Key}}} = [{Trunc(v.Value, 80)}]");
+                        }
+                        else
+                        {
+                            OnLog($"  [判断上下文] 无变量（单独执行该步骤时变量上下文为空）");
+                        }
+                        OnLog($"  [判断上下文] 表达式: {Trunc(ifExpr ?? "(空)", 60)}");
                         bool condResult;
                         if (string.IsNullOrWhiteSpace(ifExpr) && !string.IsNullOrEmpty(resolvedNode.OutputParamName))
                         {
@@ -1980,7 +2037,7 @@ namespace WeChatAutomation.Core.Recording
                     // 用户通过 PickTargetWindow 选中了具体元素，优先用该元素读取
                     hwnd = _targetWindow;
                     readElement = _targetElement;
-                    OnLog("阅读: 使用用户选择的目标元素");
+                    OnLog($"阅读: 使用用户选择的目标元素 (hwnd={hwnd}, 元素类型={_targetElement.ControlType})");
                 }
                 else if (_targetWindow != IntPtr.Zero)
                 {
@@ -2011,6 +2068,8 @@ namespace WeChatAutomation.Core.Recording
                 }
 
                 string content = ExtractAllText(readElement, 0, 10);
+                if (string.IsNullOrWhiteSpace(content))
+                    OnLog($"阅读: ExtractAllText 返回空内容 (readElement ControlType={readElement?.ControlType})");
 
                 var result = new ReadContentResult
                 {
@@ -2031,6 +2090,16 @@ namespace WeChatAutomation.Core.Recording
                 else
                 {
                     OnLog($"已读取窗口: {title} ({content.Length} 字符)");
+                }
+                // 打印实际读取到的内容到日志（便于调试和确认）
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    string preview = content.Length > 500 ? content[..500] + "...(截断)" : content;
+                    OnLog($"阅读内容:\n{preview}");
+                }
+                else
+                {
+                    OnLog("阅读内容: (空)");
                 }
             }
             catch (Exception ex) { OnLog($"读取失败: {ex.Message}"); }
@@ -2654,8 +2723,8 @@ namespace WeChatAutomation.Core.Recording
 
         /// <summary>
         /// 条件表达式求值器。
-        /// 支持: ==, !=, >, <, >=, <=, contains, matches
-        /// 变量引用 {varName} 已在 ResolveVariables 中解析
+        /// 支持: ==, !=, >, &lt;, >=, &lt;=, contains, matches
+        /// 变量引用 {varName} 在此方法内解析（不在 ResolveVariables 中替换，避免多行变量值破坏运算符匹配）。
         /// </summary>
         private bool EvaluateCondition(string? expression)
         {
@@ -2663,57 +2732,95 @@ namespace WeChatAutomation.Core.Recording
 
             string expr = expression.Trim();
 
-            // 解析 {varName} 变量引用
-            foreach (var kvp in _variables)
-                expr = expr.Replace($"{{{kvp.Key}}}", kvp.Value);
+            // ── 先解析运算符（此时 {var} 还是占位符，不会被变量值干扰） ──
 
-            // contains 运算符: A contains B
-            var containsMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s+contains\s+(.+)$");
+            // contains 运算符: {var} contains 'text'
+            var containsMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s+contains\s+'([^']*)'\s*$");
+            if (!containsMatch.Success)
+                containsMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s+contains\s+""([^""]*)""\s*$");
+            if (!containsMatch.Success)
+                containsMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s+contains\s+(\S+)\s*$");
             if (containsMatch.Success)
-                return containsMatch.Groups[1].Value.Trim().Contains(containsMatch.Groups[2].Value.Trim());
+            {
+                string left = ResolveExprVars(containsMatch.Groups[1].Value.Trim());
+                string right = ResolveExprVars(StripQuotes(containsMatch.Groups[2].Value.Trim()));
+                OnLog($"  contains 判断: 左=({Trunc(left, 50)}) 右=({Trunc(right, 30)})");
+                return left.Contains(right);
+            }
 
-            // matches 运算符: A matches B (正则)
-            var matchesMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s+matches\s+(.+)$");
+            // matches 运算符: {var} matches 'regex'
+            var matchesMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s+matches\s+'([^']*)'\s*$");
+            if (!matchesMatch.Success)
+                matchesMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s+matches\s+""([^""]*)""\s*$");
+            if (!matchesMatch.Success)
+                matchesMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s+matches\s+(\S+)\s*$");
             if (matchesMatch.Success)
             {
-                try { return System.Text.RegularExpressions.Regex.IsMatch(matchesMatch.Groups[1].Value.Trim(), matchesMatch.Groups[2].Value.Trim()); }
+                string left = ResolveExprVars(StripQuotes(matchesMatch.Groups[1].Value.Trim()));
+                string right = ResolveExprVars(StripQuotes(matchesMatch.Groups[2].Value.Trim()));
+                try { return System.Text.RegularExpressions.Regex.IsMatch(left, right); }
                 catch { return false; }
             }
 
             // 数值比较: >=, <=, >, <
             var numCmpMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s*(>=|<=|>|<)\s*(.+)$");
-            if (numCmpMatch.Success
-                && double.TryParse(numCmpMatch.Groups[1].Value.Trim(), out double left)
-                && double.TryParse(numCmpMatch.Groups[3].Value.Trim(), out double right))
+            if (numCmpMatch.Success)
             {
-                return numCmpMatch.Groups[2].Value switch
+                string lhsStr = ResolveExprVars(numCmpMatch.Groups[1].Value.Trim());
+                string rhsStr = ResolveExprVars(numCmpMatch.Groups[3].Value.Trim());
+                if (double.TryParse(lhsStr, out double left) && double.TryParse(rhsStr, out double right))
                 {
-                    ">=" => left >= right,
-                    "<=" => left <= right,
-                    ">" => left > right,
-                    "<" => left < right,
-                    _ => false
-                };
+                    return numCmpMatch.Groups[2].Value switch
+                    {
+                        ">=" => left >= right,
+                        "<=" => left <= right,
+                        ">" => left > right,
+                        "<" => left < right,
+                        _ => false
+                    };
+                }
             }
 
             // 字符串比较: ==, !=
             var strCmpMatch = System.Text.RegularExpressions.Regex.Match(expr, @"^(.+?)\s*(==|!=)\s*(.+)$");
             if (strCmpMatch.Success)
             {
-                string lhs = strCmpMatch.Groups[1].Value.Trim();
-                string rhs = strCmpMatch.Groups[3].Value.Trim();
-                // 去除引号
-                if ((lhs.StartsWith('"') && lhs.EndsWith('"')) || (lhs.StartsWith('\'') && lhs.EndsWith('\'')))
-                    lhs = lhs[1..^1];
-                if ((rhs.StartsWith('"') && rhs.EndsWith('"')) || (rhs.StartsWith('\'') && rhs.EndsWith('\'')))
-                    rhs = rhs[1..^1];
+                string lhs = ResolveExprVars(StripQuotes(strCmpMatch.Groups[1].Value.Trim()));
+                string rhs = ResolveExprVars(StripQuotes(strCmpMatch.Groups[3].Value.Trim()));
                 return strCmpMatch.Groups[2].Value == "==" ? lhs == rhs : lhs != rhs;
             }
 
             // Truthy 检查: 非空、非 "0"、非 "false" 视为 true
-            return !string.IsNullOrWhiteSpace(expr)
-                && !expr.Equals("0", StringComparison.OrdinalIgnoreCase)
-                && !expr.Equals("false", StringComparison.OrdinalIgnoreCase);
+            // 但如果包含未替换的 {varName}（变量不存在），视为 false
+            string resolved = ResolveExprVars(expr);
+            bool hasUnresolvedVar = System.Text.RegularExpressions.Regex.IsMatch(resolved, @"\{[^}]+\}");
+            if (hasUnresolvedVar)
+            {
+                // 表达式中有未解析的变量，说明变量不存在，视为 false
+                OnLog($"  变量未找到，判断为 false: {Trunc(resolved, 50)}");
+                return false;
+            }
+            return !string.IsNullOrWhiteSpace(resolved)
+                && !resolved.Equals("0", StringComparison.OrdinalIgnoreCase)
+                && !resolved.Equals("false", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>解析表达式中的 {varName} 变量引用，替换为实际值。</summary>
+        private string ResolveExprVars(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            foreach (var kvp in _variables)
+                s = s.Replace($"{{{kvp.Key}}}", kvp.Value);
+            return s;
+        }
+
+        /// <summary>去除字符串两端的单引号或双引号。</summary>
+        private static string StripQuotes(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            if ((s.StartsWith('"') && s.EndsWith('"')) || (s.StartsWith('\'') && s.EndsWith('\'')))
+                return s[1..^1];
+            return s;
         }
 
         private void DoScroll(int lines)
@@ -2780,7 +2887,7 @@ namespace WeChatAutomation.Core.Recording
                 RegexPattern = ResolveStr(node.RegexPattern),
                 RegexGroup = node.RegexGroup,
                 OutputParamName = node.OutputParamName,
-                ConditionExpression = ResolveStr(node.ConditionExpression),
+                ConditionExpression = node.ConditionExpression,   // 条件表达式不在此替换变量，由 EvaluateCondition 统一解析（避免多行变量值破坏运算符匹配）
                 GotoNodeId = node.GotoNodeId,           // NodeId 不做变量替换
                 TrueGotoNodeId = node.TrueGotoNodeId,
                 TargetScript = ResolveStr(node.TargetScript),
@@ -2804,7 +2911,15 @@ namespace WeChatAutomation.Core.Recording
                 HttpMethod = node.HttpMethod,
                 HttpHeaders = ResolveStr(node.HttpHeaders),
                 HttpBody = ResolveStr(node.HttpBody),
-                ResponseVarName = node.ResponseVarName
+                ResponseVarName = node.ResponseVarName,
+                // 步骤后行为
+                RandomWaitEnabled = node.RandomWaitEnabled,
+                RandomWaitMinSec = node.RandomWaitMinSec,
+                RandomWaitMaxSec = node.RandomWaitMaxSec,
+                RandomMouseMoveEnabled = node.RandomMouseMoveEnabled,
+                RandomMoveMinOffset = node.RandomMoveMinOffset,
+                RandomMoveMaxOffset = node.RandomMoveMaxOffset,
+                Remark = node.Remark
             };
             return resolved;
         }

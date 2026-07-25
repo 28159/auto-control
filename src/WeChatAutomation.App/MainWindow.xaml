@@ -422,7 +422,8 @@
                                             <Button Content="🔤按键" Click="AddKeys_Click" Padding="{StaticResource ButtonPaddingSmall}" Margin="0,0,2,0" FontSize="11"/>
                                             <Button Content="📋复制" Click="AddCopy_Click" Padding="{StaticResource ButtonPaddingSmall}" Margin="0,0,2,0" FontSize="11"/>
                                             <Button Content="📄粘贴" Click="AddPaste_Click" Padding="{StaticResource ButtonPaddingSmall}" Margin="0,0,2,0" FontSize="11"/>
-                                            <Button Content="✏插入" Click="AddInsert_Click" Padding="{StaticResource ButtonPaddingSmall}" FontSize="11"/>
+                                            <Button Content="✏插入" Click="AddInsert_Click" Padding="{StaticResource ButtonPaddingSmall}" Margin="0,0,2,0" FontSize="11"/>
+                                            <Button Content="🗑清空" Click="AddClearText_Click" Padding="{StaticResource ButtonPaddingSmall}" FontSize="11"/>
                                         </StackPanel>
                                     </Border>
 

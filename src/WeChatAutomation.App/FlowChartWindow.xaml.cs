@@ -47,6 +47,7 @@ namespace WeChatAutomation.App
             { ActionType.Copy, new SolidColorBrush(Color.FromRgb(158, 158, 158)) },
             { ActionType.Paste, new SolidColorBrush(Color.FromRgb(158, 158, 158)) },
             { ActionType.InsertText, new SolidColorBrush(Color.FromRgb(76, 175, 80)) },
+            { ActionType.ClearText, new SolidColorBrush(Color.FromRgb(255, 152, 0)) },
             { ActionType.Screenshot, new SolidColorBrush(Color.FromRgb(156, 39, 176)) },
             { ActionType.OpenApp, new SolidColorBrush(Color.FromRgb(0, 150, 136)) },
             { ActionType.WaitForApp, new SolidColorBrush(Color.FromRgb(255, 152, 0)) },
@@ -1161,6 +1162,7 @@ namespace WeChatAutomation.App
                     }
                 case "Copy": newNode.ActionType = ActionType.Copy; newNode.Name = "复制"; break;
                 case "Paste": newNode.ActionType = ActionType.Paste; newNode.Name = "粘贴"; break;
+                case "ClearText": newNode.ActionType = ActionType.ClearText; newNode.Name = "清空文本"; break;
                 case "InsertText":
                     {
                         var t = ShowInput("插入文本", "内容:");
@@ -1785,6 +1787,7 @@ namespace WeChatAutomation.App
             ActionType.Copy => "C",
             ActionType.Paste => "P",
             ActionType.InsertText => "I",
+            ActionType.ClearText => "X",
             ActionType.Screenshot => "S",
             ActionType.OpenApp => "O",
             ActionType.WaitForApp => "W",
@@ -1817,6 +1820,7 @@ namespace WeChatAutomation.App
                         ? $"{(string.IsNullOrEmpty(a.ElementName) ? "未知" : a.ElementName)} @({a.X:F0},{a.Y:F0})"
                         : a.X > 0 || a.Y > 0 ? $"@({a.X:F0},{a.Y:F0}){(string.IsNullOrEmpty(a.WindowTitle) ? "" : $" 窗口:{a.WindowTitle}")}" : "点击",
                 ActionType.TypeText or ActionType.InsertText => !string.IsNullOrEmpty(a.Parameter) ? $"\"{a.Parameter}\"" : a.Name,
+                ActionType.ClearText => "清空文本",
                 ActionType.SendKeys => !string.IsNullOrEmpty(a.Parameter) ? a.Parameter : "按键",
                 ActionType.Wait => a.RandomWaitEnabled ? $"{a.RandomWaitMinSec}~{a.RandomWaitMaxSec}秒" : (!string.IsNullOrEmpty(a.Parameter) ? $"{a.Parameter}ms" : "等待"),
                 ActionType.Scroll => $"{a.ScrollAmount}行",

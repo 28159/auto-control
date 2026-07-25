@@ -24,6 +24,7 @@
                 <Button Content="📋复制" Tag="Copy" Click="AddStepBtn_Click" Padding="{StaticResource ButtonPaddingSmall}" FontSize="11" Margin="2,0"/>
                 <Button Content="📄粘贴" Tag="Paste" Click="AddStepBtn_Click" Padding="{StaticResource ButtonPaddingSmall}" FontSize="11" Margin="2,0"/>
                 <Button Content="✏插入" Tag="InsertText" Click="AddStepBtn_Click" Padding="{StaticResource ButtonPaddingSmall}" FontSize="11" Margin="2,0"/>
+                <Button Content="🗑清空" Tag="ClearText" Click="AddStepBtn_Click" Padding="{StaticResource ButtonPaddingSmall}" FontSize="11" Margin="2,0"/>
 
                 <Separator Margin="5,0"/>
                 <Button Content="⏳等待" Tag="Wait" Click="AddStepBtn_Click" Padding="{StaticResource ButtonPaddingSmall}" FontSize="11" Margin="2,0"/>

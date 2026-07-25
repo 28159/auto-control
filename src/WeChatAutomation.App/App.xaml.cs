@@ -1,3 +1,4 @@
+using System.Text;
 using System.Windows;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -22,6 +23,9 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        // 设置控制台输出编码为 UTF-8，解决中文乱码
+        Console.OutputEncoding = Encoding.UTF8;
+
         base.OnStartup(e);
 
         _host = Host.CreateDefaultBuilder()
