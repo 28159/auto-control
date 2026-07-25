@@ -2,8 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
 using System.Threading.Tasks;
 using FlaUI.Core.AutomationElements;
@@ -13,6 +16,8 @@ using WeChatAutomation.Core.Logging;
 using WeChatAutomation.Core.Native;
 using WeChatAutomation.Core.Services;
 using WeChatAutomation.Core.Vision;
+using Windows.Graphics.Imaging;
+using Windows.Media.Ocr;
 
 namespace WeChatAutomation.Core.Recording
 {
@@ -2045,6 +2050,20 @@ namespace WeChatAutomation.Core.Recording
             string windowTitle = node.WindowTitle;
             try
             {
+                // OCR 视觉读取：截图 + Windows.Media.Ocr 识别文字
+                if (node.ReadMode == ReadMode.Ocr)
+                {
+                    DoReadContentByOcr(node);
+                    return;
+                }
+
+                // 多模板匹配：截图 + OpenCV MatchTemplate，任一模板命中即 true
+                if (node.ReadMode == ReadMode.Template)
+                {
+                    DoReadContentByTemplate(node);
+                    return;
+                }
+
                 AutomationElement readElement = null;
                 IntPtr hwnd;
 
@@ -2119,6 +2138,182 @@ namespace WeChatAutomation.Core.Recording
                 }
             }
             catch (Exception ex) { OnLog($"读取失败: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// OCR 视觉读取：截取目标窗口 -> Windows.Media.Ocr 识别文字 -> 存入变量。
+        /// 用于 UIA 读不到文字（如渲染时序/无障碍树缺失）时的备选方案。识别整窗口。
+        /// </summary>
+        private void DoReadContentByOcr(RecordedAction node)
+        {
+            try
+            {
+                // 解析目标窗口句柄：优先用户选窗，其次按标题解析
+                IntPtr hwnd = _targetWindow != IntPtr.Zero ? _targetWindow : ResolveTargetWindow(node.WindowTitle);
+                if (hwnd == IntPtr.Zero) { OnLog("OCR阅读: 无法获取目标窗口"); return; }
+
+                int len = User32.GetWindowTextLength(hwnd);
+                string title = "";
+                if (len > 0)
+                {
+                    var sb = new System.Text.StringBuilder(len + 1);
+                    User32.GetWindowText(hwnd, sb, sb.Capacity);
+                    title = sb.ToString();
+                }
+
+                using var screenshot = WindowCapturer.CaptureWindow(hwnd);
+                if (screenshot == null) { OnLog("OCR阅读: 窗口截图失败"); return; }
+
+                string content = OcrRecognize(screenshot);
+                if (content == null) { OnLog("OCR阅读: 识别失败（可能未安装中文OCR语言包，见系统设置->语言->OCR）"); return; }
+
+                // 是否启用“检查文字”模式：识别后 contains 检查 OcrCheckText，命中存 true 否则 false
+                bool checkMode = !string.IsNullOrWhiteSpace(node.OcrCheckText);
+                string checkText = node.OcrCheckText ?? "";
+                string storedValue;
+                if (checkMode)
+                {
+                    bool hit = content.Contains(checkText, StringComparison.OrdinalIgnoreCase);
+                    storedValue = hit ? "true" : "false";
+                    OnLog($"OCR检查: 识别到 {content.Length} 字符，是否包含「{checkText}」-> {storedValue}");
+                }
+                else
+                {
+                    storedValue = content;
+                }
+
+                var result = new ReadContentResult
+                {
+                    WindowTitle = title,
+                    Content = storedValue,
+                    CapturedAt = DateTime.Now,
+                    Source = "Ocr",
+                    OutputParamName = node.OutputParamName
+                };
+                _readResults.Add(result);
+
+                if (!string.IsNullOrEmpty(node.OutputParamName))
+                {
+                    SetVariable(node.OutputParamName, storedValue);
+                    OnLog(checkMode
+                        ? $"已OCR检查窗口: {title} -> 变量 {{{node.OutputParamName}}}={storedValue}"
+                        : $"已OCR读取窗口: {title} ({content.Length} 字符) -> 变量 {{{node.OutputParamName}}}");
+                }
+
+                // 识别内容预览（无论是否检查模式，都打印识别到的原文便于调试）
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    string preview = content.Length > 500 ? content[..500] + "...(截断)" : content;
+                    OnLog($"阅读内容(OCR):\n{preview}");
+                }
+                else
+                {
+                    OnLog("阅读内容(OCR): (空)");
+                }
+            }
+            catch (Exception ex) { OnLog($"OCR读取失败: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// 用 Windows.Media.Ocr 识别 Bitmap 中的文字。返回识别文本（可能为空串）；引擎不可用返回 null。
+        /// </summary>
+        private static string? OcrRecognize(Bitmap bitmap)
+        {
+            // 创建 OCR 引擎：优先用户语言，回退到系统可用语言
+            OcrEngine engine = OcrEngine.TryCreateFromUserProfileLanguages() ?? OcrEngine.TryCreateFromLanguage(new Windows.Globalization.Language("zh-Hans"));
+            if (engine == null)
+            {
+                // 遍历系统可用语言，取第一个能建引擎的
+                foreach (var lang in OcrEngine.AvailableRecognizerLanguages)
+                {
+                    engine = OcrEngine.TryCreateFromLanguage(lang);
+                    if (engine != null) break;
+                }
+            }
+            if (engine == null) return null;
+
+            // Bitmap -> SoftwareBitmap (BGRA8)
+            using var softwareBitmap = BitmapToSoftwareBitmap(bitmap);
+            if (softwareBitmap == null) return null;
+
+            var ocrResult = engine.RecognizeAsync(softwareBitmap).AsTask().GetAwaiter().GetResult();
+            return ocrResult?.Text ?? "";
+        }
+
+        /// <summary>System.Drawing.Bitmap -> Windows.Graphics.Imaging.SoftwareBitmap (BGRA8 premultiplied)。</summary>
+        private static Windows.Graphics.Imaging.SoftwareBitmap? BitmapToSoftwareBitmap(Bitmap bitmap)
+        {
+            try
+            {
+                // 统一转 32bppArgb，按 BGRA 顺序拷贝到缓冲区
+                using var bmp = bitmap.PixelFormat == PixelFormat.Format32bppArgb ? bitmap : new Bitmap(bitmap);
+                var rect = new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height);
+                var data = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                try
+                {
+                    int bytes = Math.Abs(data.Stride) * data.Height;
+                    byte[] buffer = new byte[bytes];
+                    Marshal.Copy(data.Scan0, buffer, 0, bytes);
+                    var softwareBitmap = new Windows.Graphics.Imaging.SoftwareBitmap(
+                        BitmapPixelFormat.Bgra8, bmp.Width, bmp.Height, BitmapAlphaMode.Premultiplied);
+                    softwareBitmap.CopyFromBuffer(buffer.AsBuffer());
+                    return softwareBitmap;
+                }
+                finally { bmp.UnlockBits(data); }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// 多模板匹配读取：截目标窗口 -> OpenCV MatchTemplate 逐个对比模板 -> 任一命中存 true，否则 false。
+        /// 用于判断"某个画面/状态是否出现"（如"无法找到该用户"那行字），比 OCR 更准：不识别文字，直接匹配画面。
+        /// 结果(true/false)存入 OutputParamName 变量供后续 If 判断。
+        /// </summary>
+        private void DoReadContentByTemplate(RecordedAction node)
+        {
+            try
+            {
+                if (node.TemplateImages == null || node.TemplateImages.Count == 0)
+                {
+                    OnLog("模板匹配阅读: 未配置模板路径（在步骤编辑的「多模板路径」框每行填一个F7截取的模板路径）");
+                    SetReadResult(node, "false", "Template", "");
+                    return;
+                }
+
+                IntPtr hwnd = _targetWindow != IntPtr.Zero ? _targetWindow : ResolveTargetWindow(node.WindowTitle);
+                if (hwnd == IntPtr.Zero) { OnLog("模板匹配阅读: 无法获取目标窗口"); SetReadResult(node, "false", "Template", ""); return; }
+
+                using var screenshot = WindowCapturer.CaptureWindow(hwnd);
+                if (screenshot == null) { OnLog("模板匹配阅读: 窗口截图失败"); SetReadResult(node, "false", "Template", ""); return; }
+
+                float threshold = node.VisionConfThreshold > 0 ? node.VisionConfThreshold : 0.7f;
+                bool hit = VisionDetector.MatchAny(screenshot, node.TemplateImages, threshold, out string? matchedPath, out float conf);
+
+                string content = hit ? "true" : "false";
+                SetReadResult(node, content, "Template", matchedPath ?? "");
+
+                if (hit)
+                    OnLog($"模板匹配: 命中 {Path.GetFileName(matchedPath)} (匹配度:{conf:P0}) -> {{{node.OutputParamName}}}={content}");
+                else
+                    OnLog($"模板匹配: 未命中任一模板 (最高匹配度:{conf:P0}, 阈值:{threshold:P0}) -> {{{node.OutputParamName}}}={content}");
+            }
+            catch (Exception ex) { OnLog($"模板匹配阅读失败: {ex.Message}"); SetReadResult(node, "false", "Template", ""); }
+        }
+
+        /// <summary>统一写阅读结果：存变量 + 加 ReadResults。matchedInfo 供日志/调试。</summary>
+        private void SetReadResult(RecordedAction node, string content, string source, string matchedInfo)
+        {
+            var result = new ReadContentResult
+            {
+                WindowTitle = "",
+                Content = content,
+                CapturedAt = DateTime.Now,
+                Source = source,
+                OutputParamName = node.OutputParamName
+            };
+            _readResults.Add(result);
+            if (!string.IsNullOrEmpty(node.OutputParamName))
+                SetVariable(node.OutputParamName, content);
         }
 
         private async Task DoScrollReadAsync(int scrollLines, string windowTitle = null, string outputParamName = null)
@@ -2896,6 +3091,9 @@ namespace WeChatAutomation.Core.Recording
                 Parameter = ResolveStr(node.Parameter),
                 DelayMs = node.DelayMs,
                 ScrollAmount = node.ScrollAmount,
+                ReadMode = node.ReadMode,
+                TemplateImages = node.TemplateImages,
+                OcrCheckText = ResolveStr(node.OcrCheckText),
                 ParameterName = node.ParameterName,
                 DefaultValue = node.DefaultValue,
                 IsRequired = node.IsRequired,

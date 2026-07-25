@@ -761,6 +761,66 @@ namespace WeChatAutomation.App
             outputVarPanel.Children.Add(outputVarBox);
             sp.Children.Add(outputVarPanel);
 
+            // 读取方式（仅阅读/滚动阅读步骤）：UIA 遍历 vs OCR 视觉识别
+            var readModePanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            readModePanel.Children.Add(new TextBlock { Text = "读取方式 (UIA读不到文字时改用OCR):", Margin = new Thickness(0, 0, 0, 3), FontSize = 11 });
+            var readModeCombo = new ComboBox { Margin = new Thickness(0, 0, 0, 0), ToolTip = "UIA=无障碍树遍历(默认)；OCR=截图+系统OCR识别文字，UIA读不到时备选" };
+            readModeCombo.Items.Add("UIA 读取（默认）");
+            readModeCombo.Items.Add("OCR 视觉读取（截图识别文字）");
+            readModeCombo.Items.Add("模板匹配（多模板任一命中）");
+            readModeCombo.SelectedIndex = node.ReadMode == WeChatAutomation.Core.Recording.ReadMode.Ocr ? 1
+                : node.ReadMode == WeChatAutomation.Core.Recording.ReadMode.Template ? 2 : 0;
+            readModePanel.Children.Add(readModeCombo);
+            sp.Children.Add(readModePanel);
+
+            // OCR 检查文字（仅 ReadMode=Ocr 时显示）：填了则OCR识别后 contains 检查，命中存true否则false；留空则存全部识别文字
+            var ocrCheckPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            ocrCheckPanel.Children.Add(new TextBlock { Text = "OCR 检查文字 (填了则识别后检查是否包含此文字，命中=true否则false；留空=存全部识别文字):", Margin = new Thickness(0, 0, 0, 3), FontSize = 11 });
+            var ocrCheckBox = new TextBox { Text = node.OcrCheckText ?? "", ToolTip = "如填「无法找到」：OCR识别窗口文字后检查是否包含，命中存true否则false。留空则把识别到的全部文字存入变量" };
+            ocrCheckPanel.Children.Add(ocrCheckBox);
+            sp.Children.Add(ocrCheckPanel);
+
+            // 多模板路径（仅 ReadMode=Template 时显示）：每行一个模板绝对路径，可手输/F7粘贴/按钮多选
+            var templatesPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            templatesPanel.Children.Add(new TextBlock { Text = "多模板路径 (每行一个，用F7截取后粘贴或点「添加图片」多选；任一匹配即true):", Margin = new Thickness(0, 0, 0, 3), FontSize = 11 });
+            var templatesBox = new TextBox
+            {
+                Text = node.TemplateImages != null ? string.Join("\n", node.TemplateImages) : "",
+                AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 80,
+                ToolTip = "每行一个模板图片绝对路径。读取方式选「模板匹配」时生效：截图后逐个比对，任一超过匹配阈值即返回true"
+            };
+            templatesPanel.Children.Add(templatesBox);
+            // 按钮行：添加图片(多选追加) / 清空
+            var tplBtnRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+            var tplAddBtn = new Button { Content = "添加图片...", Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(0, 0, 6, 0) };
+            tplAddBtn.Click += (_, _) =>
+            {
+                var dlg = new Microsoft.Win32.OpenFileDialog
+                {
+                    Title = "选择模板图片（可多选）",
+                    Filter = "图片文件|*.png;*.bmp;*.jpg;*.jpeg",
+                    Multiselect = true
+                };
+                if (dlg.ShowDialog() == true && dlg.FileNames.Length > 0)
+                {
+                    // 追加到已有路径（去重、去空行），保留手输内容
+                    var existing = templatesBox.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(s => s.Trim()).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+                    foreach (var f in dlg.FileNames)
+                        if (!existing.Contains(f, StringComparer.OrdinalIgnoreCase))
+                            existing.Add(f);
+                    templatesBox.Text = string.Join("\n", existing);
+                }
+            };
+            var tplClearBtn = new Button { Content = "清空", Padding = new Thickness(8, 2, 8, 2) };
+            tplClearBtn.Click += (_, _) => templatesBox.Text = "";
+            tplBtnRow.Children.Add(tplAddBtn);
+            tplBtnRow.Children.Add(tplClearBtn);
+            templatesPanel.Children.Add(tplBtnRow);
+            var templatesHint = new TextBlock { Text = "匹配阈值用上方的「匹配阈值」字段（默认0.7）", FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 2, 0, 0) };
+            templatesPanel.Children.Add(templatesHint);
+            sp.Children.Add(templatesPanel);
+
             // 打开全部同名窗口（仅切窗步骤用）
             var switchAllCheck = new CheckBox
             {
@@ -905,6 +965,11 @@ namespace WeChatAutomation.App
                     || t == ActionType.InsertText || t == ActionType.OpenApp || t == ActionType.WaitForApp) ? Visibility.Visible : Visibility.Collapsed;
                 scrollPanel.Visibility = (t == ActionType.Scroll || t == ActionType.ScrollRead) ? Visibility.Visible : Visibility.Collapsed;
                 outputVarPanel.Visibility = (isClick || t == ActionType.ReadContent || t == ActionType.ScrollRead || t == ActionType.RegexMatch) ? Visibility.Visible : Visibility.Collapsed;
+                readModePanel.Visibility = (t == ActionType.ReadContent || t == ActionType.ScrollRead) ? Visibility.Visible : Visibility.Collapsed;
+                ocrCheckPanel.Visibility = (t == ActionType.ReadContent || t == ActionType.ScrollRead)
+                    && readModeCombo.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+                templatesPanel.Visibility = (t == ActionType.ReadContent || t == ActionType.ScrollRead)
+                    && readModeCombo.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
                 switchAllCheck.Visibility = t == ActionType.SwitchToWindow ? Visibility.Visible : Visibility.Collapsed;
                 delayPanel.Visibility = (isClick || t == ActionType.WaitForApp || t == ActionType.OpenApp
                     || t == ActionType.TypeText || t == ActionType.SendKeys || t == ActionType.InsertText
@@ -930,6 +995,7 @@ namespace WeChatAutomation.App
 
             typeCombo.SelectionChanged += (_, _) => ApplyFieldVisibility();
             clickModeCombo.SelectionChanged += (_, _) => ApplyFieldVisibility();
+            readModeCombo.SelectionChanged += (_, _) => ApplyFieldVisibility();
             ApplyFieldVisibility();
 
             // 备注（始终显示）
@@ -969,6 +1035,20 @@ namespace WeChatAutomation.App
                 if (float.TryParse(visionConfBox.Text, out float vc) && vc > 0) node.VisionConfThreshold = vc;
                 node.TemplateImage = string.IsNullOrWhiteSpace(tplBox.Text) ? null : tplBox.Text.Trim();
                 node.OutputParamName = string.IsNullOrWhiteSpace(outputVarBox.Text) ? null : outputVarBox.Text.Trim();
+                // 读取方式（阅读/滚动阅读步骤）
+                if (readModePanel.Visibility == Visibility.Visible)
+                    node.ReadMode = readModeCombo.SelectedIndex == 1 ? WeChatAutomation.Core.Recording.ReadMode.Ocr
+                        : readModeCombo.SelectedIndex == 2 ? WeChatAutomation.Core.Recording.ReadMode.Template
+                        : WeChatAutomation.Core.Recording.ReadMode.Uia;
+                // OCR 检查文字
+                node.OcrCheckText = ocrCheckPanel.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(ocrCheckBox.Text)
+                    ? ocrCheckBox.Text.Trim() : null;
+                // 多模板路径（模板匹配模式）
+                if (templatesPanel.Visibility == Visibility.Visible)
+                    node.TemplateImages = templatesBox.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(s => s.Trim()).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+                else
+                    node.TemplateImages = null;
                 node.SwitchAll = switchAllCheck.IsChecked == true;
                 // 控制流 / HTTP 字段
                 node.ConditionExpression = string.IsNullOrWhiteSpace(whileCondBox.Text) ? node.ConditionExpression : whileCondBox.Text.Trim();
@@ -4361,6 +4441,9 @@ namespace WeChatAutomation.App
                     Parameter = action.Parameter ?? "",
                     DelayMs = action.DelayMs,
                     ScrollAmount = action.ScrollAmount,
+                    ReadMode = action.ReadMode,
+                    TemplateImages = action.TemplateImages?.ToList(),
+                    OcrCheckText = action.OcrCheckText,
                     ParameterName = action.ParameterName,
                     DefaultValue = action.DefaultValue,
                     IsRequired = action.IsRequired,

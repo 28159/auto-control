@@ -266,6 +266,59 @@ namespace WeChatAutomation.Core.Vision
             return results;
         }
 
+        /// <summary>
+        /// 多模板匹配：对 scene 截图逐个加载 templatePaths 模板做 MatchTemplate(CCoeffNormed)，
+        /// 任一模板最大匹配度 >= threshold 即返回 true，并回传命中路径与最高匹配度。
+        /// 不依赖实例状态（单例缓存），供阅读步骤多模板判断使用。
+        /// </summary>
+        public static bool MatchAny(Bitmap scene, IEnumerable<string> templatePaths, float threshold,
+            out string matchedPath, out float bestConf)
+        {
+            matchedPath = null;
+            bestConf = 0f;
+            if (scene == null || templatePaths == null) return false;
+
+            try
+            {
+                using var sceneGray = BitmapToGrayMat(scene);
+                if (sceneGray == null || sceneGray.Empty()) return false;
+
+                float thr = Math.Clamp(threshold, 0f, 1f);
+                foreach (var path in templatePaths)
+                {
+                    if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) continue;
+                    using var tpl = Cv2.ImRead(path, ImreadModes.Color);
+                    if (tpl == null || tpl.Empty()) continue;
+                    if (tpl.Width > sceneGray.Width || tpl.Height > sceneGray.Height) continue;
+
+                    using var tplGray = new Mat();
+                    Cv2.CvtColor(tpl, tplGray, ColorConversionCodes.BGR2GRAY);
+                    using var result = new Mat();
+                    Cv2.MatchTemplate(sceneGray, tplGray, result, TemplateMatchModes.CCoeffNormed);
+
+                    // 取全局最大匹配度
+                    Cv2.MinMaxLoc(result, out _, out double maxVal, out _, out _);
+                    float conf = (float)maxVal;
+                    if (conf > bestConf)
+                    {
+                        bestConf = conf;
+                        matchedPath = path;
+                    }
+                    if (conf >= thr)
+                    {
+                        // 命中即可返回，但 bestConf/matchedPath 已记录本次最高
+                        return true;
+                    }
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn("VisionDetector", $"多模板匹配异常: {ex.Message}");
+                return false;
+            }
+        }
+
         public void Dispose()
         {
             if (!_disposed)

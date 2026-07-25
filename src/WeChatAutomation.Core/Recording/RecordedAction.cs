@@ -52,6 +52,17 @@ namespace WeChatAutomation.Core.Recording
     }
 
     /// <summary>
+    /// 阅读/滚动阅读步骤的读取方式。Uia=UIAutomation遍历读文字；Ocr=截图+Windows.Media.Ocr识别文字；Template=多模板匹配判断画面是否出现。
+    /// </summary>
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public enum ReadMode
+    {
+        Uia,
+        Ocr,
+        Template
+    }
+
+    /// <summary>
     /// If 分支（成立/不成立）的行为类型。
     /// </summary>
     [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -105,6 +116,16 @@ namespace WeChatAutomation.Core.Recording
         public string Parameter { get; set; } = "";
         public int DelayMs { get; set; } = 300;
         public int ScrollAmount { get; set; } = 3; // 滚动行数
+
+        // ── 阅读步骤的读取方式（ReadContent/ScrollRead 可用） ──
+        /// <summary>读取方式：Uia=UIAutomation遍历（默认）；Ocr=截图+Windows.Media.Ocr识别；Template=多模板匹配任一命中。</summary>
+        public ReadMode ReadMode { get; set; } = ReadMode.Uia;
+
+        /// <summary>多模板匹配的模板路径列表（ReadMode=Template 时用，任一匹配超过阈值即 true）。每项为模板图片绝对路径。</summary>
+        public List<string>? TemplateImages { get; set; }
+
+        /// <summary>OCR 检查文字（ReadMode=Ocr 时用）：非空则 OCR 识别后 contains 检查此文字，命中存 true 否则 false；为空则存全部识别文字。</summary>
+        public string? OcrCheckText { get; set; }
 
         // ── 步骤后随机等待（所有步骤类型可用） ──
         /// <summary>步骤执行完成后是否随机等待。默认 false。</summary>
