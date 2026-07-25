@@ -211,6 +211,7 @@
                                 <Border Background="White" CornerRadius="6" Padding="6" Margin="0,4,0,0" Effect="{StaticResource CardShadow}">
                                     <StackPanel>
                                         <Button Content="📊 流程图" Click="FlowChartBtn_Click" Padding="20,7" HorizontalContentAlignment="Left" Margin="0,0,0,3"/>
+                                        <Button Content="🖼 截取视觉模板 (F7)" Click="TemplateCaptureBtn_Click" Padding="20,7" HorizontalContentAlignment="Left" Margin="0,0,0,3"/>
                                         <Button Content="⚙ 参数" Click="ManageParams_Click" Padding="20,7" HorizontalContentAlignment="Left"/>
                                     </StackPanel>
                                 </Border>

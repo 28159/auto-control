@@ -335,6 +335,7 @@ namespace WeChatAutomation.Core.Native
         }
 
         public const byte VK_F5 = 0x74;
+        public const byte VK_F7 = 0x76;
         public const byte VK_F8 = 0x77;
         public const byte VK_F9 = 0x78;
         public const byte VK_F10 = 0x79;

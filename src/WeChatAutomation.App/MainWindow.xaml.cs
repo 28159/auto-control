@@ -13,9 +13,11 @@ using System.Windows.Threading;
 using Microsoft.Extensions.Configuration;
 using FlaUIAutomation = FlaUI.Core.AutomationElements;
 using FlaUI.UIA3;
+using WeChatAutomation.Core;
 using WeChatAutomation.Core.Native;
 using WeChatAutomation.Core.Recording;
 using WeChatAutomation.Core.Services;
+using WeChatAutomation.Core.Vision;
 
 namespace WeChatAutomation.App
 {
@@ -115,6 +117,7 @@ namespace WeChatAutomation.App
             else if (vk == User32.VK_F11) { if (_player.IsPlaying) _player.Stop(); else _ = PlayAll(); }
             else if (vk == User32.VK_F12) { if (_isInspecting) StopInspect(); else StartInspect(); }
             else if (vk == User32.VK_F8) { if (_isTreeCapturing) StopTreeCapture(); else StartTreeCapture(); }
+            else if (vk == User32.VK_F7) { if (_isTplCapturing) StopTemplateCapture(); else StartTemplateCapture(); }
         }
 
         // ═══ 录制 ═══
@@ -2388,6 +2391,217 @@ namespace WeChatAutomation.App
             AppendLog("🌳 路径树抓取已关闭");
         }
 
+        // ═══ 视觉模板截取（F7）══
+        // 按 F7 进入截取模式 -> 鼠标点击目标元素 -> 以点击点为中心截取 80×28 模板图存到 templates/，
+        // 弹窗显示模板预览和绝对路径（可复制）。用于为视觉模式步骤手动生成模板图片。
+        // 复用 F8 路径树抓取的全局鼠标钩子结构，截图逻辑对齐 ActionRecorder.SaveVisionTemplate。
+        private bool _isTplCapturing = false;
+        private bool _tplCaptured = false;   // 已截取一次，忽略后续点击
+        private IntPtr _tplHookId = IntPtr.Zero;
+        private User32.LowLevelMouseProc _tplHookProc;
+        private Window _tplTopBar;
+        private KeyEventHandler _tplEscHandler;
+
+        private void TemplateCaptureBtn_Click(object s, RoutedEventArgs e)
+        {
+            if (_isTplCapturing) StopTemplateCapture(); else StartTemplateCapture();
+        }
+
+        private void StartTemplateCapture()
+        {
+            if (_isTplCapturing) return;
+            _isTplCapturing = true;
+            _tplCaptured = false;
+
+            _tplTopBar = new Window
+            {
+                Title = "视觉模板截取", Width = 560, Height = 40,
+                WindowStyle = WindowStyle.None, AllowsTransparency = true,
+                Background = new SolidColorBrush(Color.FromArgb(240, 0, 96, 100)),
+                Foreground = Brushes.White, ShowInTaskbar = false, Topmost = true,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                IsHitTestVisible = false, Focusable = false
+            };
+            _tplTopBar.Content = new TextBlock
+            {
+                Text = "🖼 视觉模板截取 - 点击目标元素以点击点为中心截取模板（点击后自动结束）| F7 或 Esc 取消",
+                FontSize = 12, FontWeight = FontWeights.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+            };
+            _tplTopBar.Show();
+
+            _tplHookProc = (int nCode, IntPtr wParam, IntPtr lParam) =>
+            {
+                if (nCode >= 0 && (int)wParam == User32.WM_LBUTTONDOWN && !_tplCaptured)
+                {
+                    _tplCaptured = true;
+                    if (_tplHookId != IntPtr.Zero)
+                    {
+                        User32.UnhookWindowsHookEx(_tplHookId);
+                        _tplHookId = IntPtr.Zero;
+                    }
+
+                    var st = Marshal.PtrToStructure<User32.MSLLHOOKSTRUCT>(lParam);
+                    int x = st.pt.x, y = st.pt.y;
+                    // 后台线程截取避免阻塞钩子链
+                    System.Threading.Tasks.Task.Run(() => CaptureAndSaveTemplate(x, y));
+                }
+                return User32.CallNextHookEx(_tplHookId, nCode, wParam, lParam);
+            };
+
+            using (var cur = System.Diagnostics.Process.GetCurrentProcess())
+            using (var mod = cur.MainModule)
+            {
+                _tplHookId = User32.SetWindowsHookEx(User32.WH_MOUSE_LL, _tplHookProc,
+                    User32.GetModuleHandle(mod!.ModuleName), 0);
+            }
+
+            _tplEscHandler = new KeyEventHandler((s, e) =>
+            {
+                if (e.Key == Key.Escape && _isTplCapturing) StopTemplateCapture();
+            });
+            this.KeyDown += _tplEscHandler;
+
+            AppendLog("🖼 视觉模板截取已开启 - 点击目标元素截取模板，点击后自动结束（F7/Esc 取消）");
+        }
+
+        private void StopTemplateCapture()
+        {
+            if (!_isTplCapturing) return;
+            _isTplCapturing = false;
+
+            if (_tplHookId != IntPtr.Zero)
+            {
+                User32.UnhookWindowsHookEx(_tplHookId);
+                _tplHookId = IntPtr.Zero;
+            }
+            if (_tplEscHandler != null)
+            {
+                this.KeyDown -= _tplEscHandler;
+                _tplEscHandler = null;
+            }
+            try { _tplTopBar?.Close(); } catch { }
+            _tplTopBar = null;
+
+            AppendLog("🖼 视觉模板截取已关闭");
+        }
+
+        /// <summary>
+        /// 以点击点 (x,y) 为中心，从其所在顶层窗口截取 80×28 模板图，存到 templates/，
+        /// 弹窗显示预览和可复制的绝对路径。截图尺寸/命名对齐 ActionRecorder.SaveVisionTemplate。
+        /// </summary>
+        private void CaptureAndSaveTemplate(int x, int y)
+        {
+            string? templatePath = null;
+            string? errorMsg = null;
+            try
+            {
+                // 从屏幕坐标找到顶层窗口
+                IntPtr hwnd = User32.WindowFromPoint(new User32.POINT { x = x, y = y });
+                if (hwnd == IntPtr.Zero) { errorMsg = "点击位置未找到窗口"; }
+                else
+                {
+                    IntPtr topLevel = User32.GetAncestor(hwnd, User32.GA_ROOT);
+                    if (topLevel == IntPtr.Zero) topLevel = hwnd;
+
+                    var (winX, winY, winW, winH) = WindowCapturer.GetWindowRect(topLevel);
+                    if (winW <= 0 || winH <= 0) { errorMsg = "窗口尺寸无效"; }
+                    else
+                    {
+                        using var screenshot = WindowCapturer.CaptureWindow(topLevel);
+                        if (screenshot == null) { errorMsg = "窗口截图失败"; }
+                        else
+                        {
+                            // 点击点转窗口局部坐标
+                            int localX = x - winX;
+                            int localY = y - winY;
+
+                            // 模板尺寸：按钮典型 80×28（对齐 EstimateElementWidth/Height 的 Button）
+                            int w = 80, h = 28;
+                            int tx = localX - w / 2;
+                            int ty = localY - h / 2;
+                            if (tx < 0) tx = 0;
+                            if (ty < 0) ty = 0;
+                            if (tx + w > screenshot.Width) w = screenshot.Width - tx;
+                            if (ty + h > screenshot.Height) h = screenshot.Height - ty;
+                            if (w < 16 || h < 16) { errorMsg = "可截取区域过小，换个位置点"; }
+                            else
+                            {
+                                using var template = new System.Drawing.Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                                using (var g = System.Drawing.Graphics.FromImage(template))
+                                {
+                                    g.DrawImage(screenshot, new System.Drawing.Rectangle(0, 0, w, h),
+                                        new System.Drawing.Rectangle(tx, ty, w, h), System.Drawing.GraphicsUnit.Pixel);
+                                }
+
+                                Directory.CreateDirectory(AppPaths.TemplatesDir);
+                                string fileName = $"tpl_{DateTime.Now:yyyyMMdd_HHmmss}_{x}_{y}.png";
+                                templatePath = Path.Combine(AppPaths.TemplatesDir, fileName);
+                                template.Save(templatePath, System.Drawing.Imaging.ImageFormat.Png);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { errorMsg = ex.Message; }
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                StopTemplateCapture();
+                if (templatePath != null)
+                {
+                    AppendLog($"🖼 已截取视觉模板: {templatePath}");
+                    ShowTemplatePreview(templatePath);
+                }
+                else
+                {
+                    AppendLog($"🖼 截取模板失败: {errorMsg ?? "未知错误"}");
+                }
+            }));
+        }
+
+        /// <summary>弹窗显示模板预览图和绝对路径（可复制）。</summary>
+        private void ShowTemplatePreview(string templatePath)
+        {
+            var w = new Window
+            {
+                Title = "视觉模板已截取", Width = 460, Height = 320,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen
+            };
+            var sp = new StackPanel { Margin = new Thickness(12) };
+            sp.Children.Add(new TextBlock { Text = "模板已保存（填入视觉步骤的「模板图片」字段）：", FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 8) });
+
+            try
+            {
+                using var fs = new FileStream(templatePath, FileMode.Open, FileAccess.Read);
+                var bmp = new System.Windows.Media.Imaging.BitmapImage();
+                bmp.BeginInit();
+                bmp.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                bmp.StreamSource = fs;
+                bmp.EndInit();
+                bmp.Freeze();
+                var img = new Image { Source = bmp, Stretch = Stretch.None, Margin = new Thickness(0, 0, 0, 8), HorizontalAlignment = HorizontalAlignment.Left };
+                // 加边框便于看清小图
+                img.SetValue(BorderBrushProperty, Brushes.LightGray);
+                sp.Children.Add(img);
+            }
+            catch { sp.Children.Add(new TextBlock { Text = "(预览加载失败)", Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 8) }); }
+
+            var pathBox = new TextBox { Text = templatePath, IsReadOnly = true, Margin = new Thickness(0, 0, 0, 8) };
+            sp.Children.Add(pathBox);
+
+            var btnRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            var copyBtn = new Button { Content = "复制路径", Padding = new Thickness(15, 5, 15, 5), Margin = new Thickness(0, 0, 8, 0) };
+            copyBtn.Click += (_, _) => { try { Clipboard.SetText(templatePath); AppendLog("🖼 模板路径已复制到剪切板"); } catch { } };
+            var okBtn = new Button { Content = "确定", Padding = new Thickness(15, 5, 15, 5), IsDefault = true };
+            okBtn.Click += (_, _) => w.Close();
+            btnRow.Children.Add(copyBtn); btnRow.Children.Add(okBtn);
+            sp.Children.Add(btnRow);
+
+            w.Content = sp;
+            w.Show();
+        }
+
         /// <summary>
         /// 抓取点击位置元素的 UIA 路径树并弹窗展示。
         /// 向上找到窗口根，再向下递归生成子树（限制深度和宽度避免超大树）。
@@ -4155,7 +4369,35 @@ namespace WeChatAutomation.App
                     RegexGroup = action.RegexGroup,
                     OutputParamName = action.OutputParamName,
                     IsEnabled = action.IsEnabled,
-                    CreatedAt = action.CreatedAt
+                    CreatedAt = action.CreatedAt,
+                    // 步骤后随机行为：必须显式拷贝，否则重建对象丢失勾选（默认 false），带参数回放时随机等待/鼠标移动不生效
+                    RandomWaitEnabled = action.RandomWaitEnabled,
+                    RandomWaitMinSec = action.RandomWaitMinSec,
+                    RandomWaitMaxSec = action.RandomWaitMaxSec,
+                    RandomMouseMoveEnabled = action.RandomMouseMoveEnabled,
+                    RandomMoveMinOffset = action.RandomMoveMinOffset,
+                    RandomMoveMaxOffset = action.RandomMoveMaxOffset,
+                    // 控制流 / HTTP 字段：原实现漏拷，If/While/HttpWait 等带参数回放会丢配置
+                    ConditionExpression = action.ConditionExpression,
+                    GotoNodeId = action.GotoNodeId,
+                    TrueGotoNodeId = action.TrueGotoNodeId,
+                    TargetScript = action.TargetScript,
+                    SwitchAll = action.SwitchAll,
+                    TrueBranch = action.TrueBranch,
+                    TrueBranchScript = action.TrueBranchScript,
+                    FalseBranch = action.FalseBranch,
+                    FalseBranchScript = action.FalseBranchScript,
+                    MaxLoopCount = action.MaxLoopCount,
+                    LoopCount = action.LoopCount,
+                    WaitKey = action.WaitKey,
+                    WaitTimeoutMs = action.WaitTimeoutMs,
+                    HttpUrl = action.HttpUrl,
+                    HttpMethod = action.HttpMethod,
+                    HttpHeaders = action.HttpHeaders,
+                    HttpBody = action.HttpBody,
+                    ResponseVarName = action.ResponseVarName,
+                    TrueActions = action.TrueActions,
+                    FalseActions = action.FalseActions
                 };
 
                 foreach (var kvp in parameters)

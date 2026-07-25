@@ -268,7 +268,7 @@ namespace WeChatAutomation.Core.Recording
                 }
                 if (node.RandomMouseMoveEnabled)
                 {
-                    OnLog($"步骤后鼠标随机移动 ({node.RandomMoveMinOffset}~{node.RandomMoveMaxOffset}px)");
+                    OnLog("步骤后鼠标随机移动 (全屏多点随机)");
                     await RandomMouseWander(node.RandomMoveMinOffset, node.RandomMoveMaxOffset);
                 }
                 currentIndex = jumpTo.HasValue ? jumpTo.Value : currentIndex + 1;
@@ -280,25 +280,33 @@ namespace WeChatAutomation.Core.Recording
         private const int MaxTotalIterations = 100000;
 
         /// <summary>
-        /// 随机鼠标漂移：模拟人类在操作间隙的鼠标无意识移动。
-        /// 从当前位置随机偏移 minOffset~maxOffset 像素，使用贝塞尔曲线移动。
+        /// 随机鼠标漂移：模拟人类在操作间隙鼠标在屏幕上无意识乱动。
+        /// 在整个屏幕范围内随机选取多个点连续移动过去，方向和距离均随机，
+        /// 每段用贝塞尔曲线平滑过渡，段间随机短暂停顿。
+        /// minOffset/maxOffset 参数仅为兼容旧调用保留，不再作为偏移阈值--移动范围恒为全屏。
         /// </summary>
         private async Task RandomMouseWander(int minOffset = 30, int maxOffset = 120)
         {
             try
             {
-                User32.GetCursorPos(out User32.POINT current);
-                // 随机偏移方向和距离
-                int offset = _rng.Next(minOffset, maxOffset + 1);
-                double angle = _rng.NextDouble() * Math.PI * 2;
-                int targetX = current.x + (int)(offset * Math.Cos(angle));
-                int targetY = current.y + (int)(offset * Math.Sin(angle));
-                // 限制在屏幕范围内
                 int screenW = User32.GetSystemMetrics(User32.SM_CXSCREEN);
                 int screenH = User32.GetSystemMetrics(User32.SM_CYSCREEN);
-                targetX = Math.Clamp(targetX, 0, screenW - 1);
-                targetY = Math.Clamp(targetY, 0, screenH - 1);
-                await _simulator.MoveToAsync(targetX, targetY);
+                if (screenW <= 0 || screenH <= 0) return;
+
+                // 随机移动段数：2~5 段连续移动，每段终点全屏随机，方向和距离自然随机
+                int segments = _rng.Next(2, 6);
+                for (int i = 0; i < segments; i++)
+                {
+                    // 全屏范围内随机一个目标点（留少量边距避免贴边）
+                    int margin = 10;
+                    int targetX = _rng.Next(margin, screenW - margin);
+                    int targetY = _rng.Next(margin, screenH - margin);
+                    await _simulator.MoveToAsync(targetX, targetY);
+
+                    // 段间随机短暂停顿，模拟人类移动间的犹豫
+                    if (i < segments - 1)
+                        await Task.Delay(_rng.Next(80, 350));
+                }
             }
             catch
             {
@@ -423,7 +431,6 @@ namespace WeChatAutomation.Core.Recording
 
                 case ActionType.If:
                     {
-                        // 便捷模式：条件表达式为空但设置了 OutputParamName，直接判断该变量（阅读/正则内容）是否有值
                         string? ifExpr = resolvedNode.ConditionExpression;
                         // 打印当前所有变量值，便于调试判断逻辑
                         if (_variables.Count > 0)
@@ -437,6 +444,15 @@ namespace WeChatAutomation.Core.Recording
                             OnLog($"  [判断上下文] 无变量（单独执行该步骤时变量上下文为空）");
                         }
                         OnLog($"  [判断上下文] 表达式: {Trunc(ifExpr ?? "(空)", 60)}");
+
+                        // 提示：表达式仅有 {varName} 无运算符时，建议用 contains 判断具体内容
+                        if (!string.IsNullOrWhiteSpace(ifExpr)
+                            && System.Text.RegularExpressions.Regex.IsMatch(ifExpr.Trim(), @"^\{[^}]+\}$")
+                            && _variables.Count > 0)
+                        {
+                            OnLog($"  ⚠ 提示: 表达式仅判断变量是否有值，阅读窗口总会读到UI元素文字导致非空。建议改为: {ifExpr.Trim()} contains '要查找的文字'");
+                        }
+
                         bool condResult;
                         if (string.IsNullOrWhiteSpace(ifExpr) && !string.IsNullOrEmpty(resolvedNode.OutputParamName))
                         {

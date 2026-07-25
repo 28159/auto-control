@@ -102,7 +102,12 @@ namespace WeChatAutomation.Core.Services
                 // 复制主脚本的阅读目标到子脚本（若主脚本设置了 PickTargetWindow）
                 // 子脚本通常应自行指定窗口，这里不复制以保持隔离
 
-                subPlayer.Play(actions, null).GetAwaiter().GetResult();
+                // 在线程池线程执行子脚本，避免在 UI 线程上 .GetAwaiter().GetResult() 阻塞导致死锁：
+                // 主脚本 If 步骤在 UI 线程触发 SubScriptRequested -> 本方法同步阻塞 UI 线程等 subPlayer.Play；
+                // 若直接在 UI 线程跑 Play，其内部 await Task.Delay 的 continuation 要回到 UI 同步上下文，
+                // 而 UI 线程正被阻塞 -> 死锁（症状：子脚本"定位成功"后卡住不动）。
+                // Task.Run 让 Play 在无 UI SynchronizationContext 的线程池线程上运行，continuation 回线程池，死锁解除。
+                Task.Run(() => subPlayer.Play(actions, null)).GetAwaiter().GetResult();
 
                 // 合并子脚本的读取/视觉结果到主结果
                 foreach (var r in subPlayer.ReadResults) _player.AppendReadResult(r);
@@ -341,7 +346,14 @@ namespace WeChatAutomation.Core.Services
                     HttpMethod = action.HttpMethod,
                     HttpHeaders = action.HttpHeaders,
                     HttpBody = action.HttpBody,
-                    ResponseVarName = action.ResponseVarName
+                    ResponseVarName = action.ResponseVarName,
+                    // 步骤后随机行为：必须显式拷贝，否则重建对象会丢失勾选状态（默认 false），导致带参数回放时随机等待/鼠标移动不生效
+                    RandomWaitEnabled = action.RandomWaitEnabled,
+                    RandomWaitMinSec = action.RandomWaitMinSec,
+                    RandomWaitMaxSec = action.RandomWaitMaxSec,
+                    RandomMouseMoveEnabled = action.RandomMouseMoveEnabled,
+                    RandomMoveMinOffset = action.RandomMoveMinOffset,
+                    RandomMoveMaxOffset = action.RandomMoveMaxOffset
                 };
 
                 foreach (var kvp in parameters)
