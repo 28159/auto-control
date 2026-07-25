@@ -245,6 +245,7 @@
                                         <ColumnDefinition Width="*" SharedSizeGroup="ColSummary"/>
                                         <ColumnDefinition Width="54" SharedSizeGroup="ColMode"/>
                                         <ColumnDefinition Width="48" SharedSizeGroup="ColDelay"/>
+                                        <ColumnDefinition Width="80" SharedSizeGroup="ColRandom"/>
                                         <ColumnDefinition Width="66" SharedSizeGroup="ColRemark"/>
                                         <ColumnDefinition Width="44" SharedSizeGroup="ColAction"/>
                                     </Grid.ColumnDefinitions>
@@ -256,8 +257,9 @@
                                     <TextBlock Grid.Column="5" Text="说明" FontSize="10" Foreground="{StaticResource TextMutedBrush}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="4,0,0,0"/>
                                     <TextBlock Grid.Column="6" Text="模式" FontSize="10" Foreground="{StaticResource TextMutedBrush}" FontWeight="SemiBold" VerticalAlignment="Center" HorizontalAlignment="Center"/>
                                     <TextBlock Grid.Column="7" Text="延迟" FontSize="10" Foreground="{StaticResource TextMutedBrush}" FontWeight="SemiBold" VerticalAlignment="Center" HorizontalAlignment="Center"/>
-                                    <TextBlock Grid.Column="8" Text="备注" FontSize="10" Foreground="{StaticResource TextMutedBrush}" FontWeight="SemiBold" VerticalAlignment="Center" HorizontalAlignment="Center"/>
-                                    <TextBlock Grid.Column="9" Text="操作" FontSize="10" Foreground="{StaticResource TextMutedBrush}" FontWeight="SemiBold" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                    <TextBlock Grid.Column="8" Text="随机行为" FontSize="10" Foreground="{StaticResource TextMutedBrush}" FontWeight="SemiBold" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                    <TextBlock Grid.Column="9" Text="备注" FontSize="10" Foreground="{StaticResource TextMutedBrush}" FontWeight="SemiBold" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                    <TextBlock Grid.Column="10" Text="操作" FontSize="10" Foreground="{StaticResource TextMutedBrush}" FontWeight="SemiBold" VerticalAlignment="Center" HorizontalAlignment="Center"/>
                                 </Grid>
                             </Border>
 
@@ -322,11 +324,12 @@
                                                     <ColumnDefinition Width="*" SharedSizeGroup="ColSummary"/>
                                                     <ColumnDefinition Width="54" SharedSizeGroup="ColMode"/>
                                                     <ColumnDefinition Width="48" SharedSizeGroup="ColDelay"/>
+                                                    <ColumnDefinition Width="80" SharedSizeGroup="ColRandom"/>
                                                     <ColumnDefinition Width="66" SharedSizeGroup="ColRemark"/>
                                                     <ColumnDefinition Width="44" SharedSizeGroup="ColAction"/>
                                                 </Grid.ColumnDefinitions>
 
-                                                <Border Grid.Column="0" Grid.ColumnSpan="10" Width="3" Background="{Binding BranchColor}" CornerRadius="1" HorizontalAlignment="Left"
+                                                <Border Grid.Column="0" Grid.ColumnSpan="11" Width="3" Background="{Binding BranchColor}" CornerRadius="1" HorizontalAlignment="Left"
                                                         Visibility="{Binding BranchColor, Converter={StaticResource NullToCollapsed}}"/>
                                                 <CheckBox Grid.Column="0" IsChecked="{Binding IsRowSelected, Mode=TwoWay}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                                 <CheckBox Grid.Column="1" IsChecked="{Binding Action.IsEnabled, Mode=TwoWay}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -342,8 +345,9 @@
                                                            TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="4,0,4,0"/>
                                                 <TextBlock Grid.Column="6" Text="{Binding ClickModeDisplay}" FontSize="10" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
                                                 <TextBlock Grid.Column="7" Text="{Binding DelayDisplay}" FontSize="10" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
-                                                <TextBlock Grid.Column="8" Text="{Binding RemarkDisplay}" FontSize="10" Foreground="{StaticResource TextFaintBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" HorizontalAlignment="Center"/>
-                                                <StackPanel Grid.Column="9" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                <TextBlock Grid.Column="8" Text="{Binding RandomBehaviorDisplay}" FontSize="9" Foreground="{StaticResource TextMutedBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                                <TextBlock Grid.Column="9" Text="{Binding RemarkDisplay}" FontSize="10" Foreground="{StaticResource TextFaintBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                                <StackPanel Grid.Column="10" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                                                     <Button Content="▶" Click="RunSingleAction_Click" Padding="4,1" FontSize="9" Tag="{Binding Action}" Margin="0,0,2,0" ToolTip="单独运行"/>
                                                     <Button Content="✕" Click="DeleteSingleTreeNode_Click" Padding="4,1" FontSize="9" Foreground="{StaticResource DangerBrush}" Tag="{Binding}" ToolTip="删除"/>
                                                 </StackPanel>

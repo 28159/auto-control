@@ -147,6 +147,11 @@ namespace WeChatAutomation.App
         /// <summary>延迟毫秒数显示。</summary>
         public string DelayDisplay => IsBranchHeader ? "" : $"{Action.DelayMs}ms";
 
+        /// <summary>步骤后随机行为状态显示（如 "⏳3~16秒 🖱30~120px"）。</summary>
+        public string RandomBehaviorDisplay => IsBranchHeader ? ""
+            : (Action.RandomWaitEnabled ? $"⏳{Action.RandomWaitMinSec}~{Action.RandomWaitMaxSec}秒" : "")
+            + (Action.RandomMouseMoveEnabled ? $"{(Action.RandomWaitEnabled ? " " : "")}🖱{Action.RandomMoveMinOffset}~{Action.RandomMoveMaxOffset}px" : "");
+
         /// <summary>点击模式显示。</summary>
         public string ClickModeDisplay => IsBranchHeader ? "" : Action.ActionType == ActionType.Click
             ? Action.ClickMode switch

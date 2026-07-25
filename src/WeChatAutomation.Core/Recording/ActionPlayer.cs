@@ -24,6 +24,7 @@ namespace WeChatAutomation.Core.Recording
         private static readonly Logger _logger = Logger.Instance;
         private static readonly UIA3Automation _automation = new();
         private static readonly ConditionFactory _cf = _automation.ConditionFactory;
+        private static readonly Random _rng = new();
         private CancellationTokenSource _cts;
         private bool _isPlaying;
         private IntPtr _targetWindow = IntPtr.Zero;
@@ -220,6 +221,21 @@ namespace WeChatAutomation.Core.Recording
                 if (node.DelayMs > 0) await Task.Delay(node.DelayMs, _cts.Token);
 
                 int? jumpTo = await ExecuteNode(node, nodeIndexMap);
+
+                // 步骤执行完成后：按步骤配置执行随机等待和鼠标移动
+                if (node.RandomWaitEnabled)
+                {
+                    int minSec = Math.Clamp(node.RandomWaitMinSec, 1, 60);
+                    int maxSec = Math.Clamp(node.RandomWaitMaxSec, 1, 60);
+                    if (maxSec < minSec) maxSec = minSec;
+                    int sec = _rng.Next(minSec, maxSec + 1);
+                    OnLog($"步骤后随机等待 {minSec}~{maxSec}秒，本次 {sec}秒");
+                    await Task.Delay(sec * 1000, _cts.Token);
+                }
+                if (node.RandomMouseMoveEnabled)
+                {
+                    await RandomMouseWander(node.RandomMoveMinOffset, node.RandomMoveMaxOffset);
+                }
                 currentIndex = jumpTo.HasValue ? jumpTo.Value : currentIndex + 1;
             }
         }
@@ -227,6 +243,33 @@ namespace WeChatAutomation.Core.Recording
         /// <summary>跨递归调用的总迭代计数，防止死循环。</summary>
         private int _totalIterations;
         private const int MaxTotalIterations = 100000;
+
+        /// <summary>
+        /// 随机鼠标漂移：模拟人类在操作间隙的鼠标无意识移动。
+        /// 从当前位置随机偏移 minOffset~maxOffset 像素，使用贝塞尔曲线移动。
+        /// </summary>
+        private async Task RandomMouseWander(int minOffset = 30, int maxOffset = 120)
+        {
+            try
+            {
+                User32.GetCursorPos(out User32.POINT current);
+                // 随机偏移方向和距离
+                int offset = _rng.Next(minOffset, maxOffset + 1);
+                double angle = _rng.NextDouble() * Math.PI * 2;
+                int targetX = current.x + (int)(offset * Math.Cos(angle));
+                int targetY = current.y + (int)(offset * Math.Sin(angle));
+                // 限制在屏幕范围内
+                int screenW = User32.GetSystemMetrics(User32.SM_CXSCREEN);
+                int screenH = User32.GetSystemMetrics(User32.SM_CYSCREEN);
+                targetX = Math.Clamp(targetX, 0, screenW - 1);
+                targetY = Math.Clamp(targetY, 0, screenH - 1);
+                await _simulator.MoveToAsync(targetX, targetY);
+            }
+            catch
+            {
+                // 鼠标漂移失败不影响主流程
+            }
+        }
 
         private async Task<int?> ExecuteNode(RecordedAction node, Dictionary<string, int> nodeIndexMap)
         {
@@ -253,8 +296,24 @@ namespace WeChatAutomation.Core.Recording
                     break;
 
                 case ActionType.Wait:
-                    if (int.TryParse(resolvedNode.Parameter, out int ms)) { OnLog($"等待 {ms}ms"); await Task.Delay(ms); }
-                    break;
+                    {
+                        // 随机等待模式
+                        if (resolvedNode.RandomWaitEnabled)
+                        {
+                            int minSec = Math.Clamp(resolvedNode.RandomWaitMinSec, 1, 60);
+                            int maxSec = Math.Clamp(resolvedNode.RandomWaitMaxSec, 1, 60);
+                            if (maxSec < minSec) maxSec = minSec;
+                            int sec = _rng.Next(minSec, maxSec + 1);
+                            OnLog($"随机等待 {minSec}~{maxSec}秒，本次 {sec}秒");
+                            await Task.Delay(sec * 1000, _cts.Token);
+                        }
+                        else if (int.TryParse(resolvedNode.Parameter, out int ms))
+                        {
+                            OnLog($"等待 {ms}ms");
+                            await Task.Delay(ms, _cts.Token);
+                        }
+                        break;
+                    }
 
                 case ActionType.Copy:
                     await DoSendKeysAsync("Ctrl+C");

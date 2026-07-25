@@ -118,23 +118,67 @@ namespace WeChatAutomation.Core.Services
                 };
             }
 
-            // 等待N秒/毫秒
-            var waitMatch = Regex.Match(command, @"等待\s*(\d+)\s*(秒|毫秒|ms|s)");
-            if (waitMatch.Success)
+            // 随机等待N~M秒
+            var waitRangeMatch = Regex.Match(command, @"随机等待\s*(\d+)\s*[-~到]\s*(\d+)\s*(秒|s)");
+            if (waitRangeMatch.Success)
             {
-                int value = int.Parse(waitMatch.Groups[1].Value);
-                string unit = waitMatch.Groups[2].Value;
-                int ms = unit is "秒" or "s" ? value * 1000 : value;
+                int minSec = Math.Clamp(int.Parse(waitRangeMatch.Groups[1].Value), 1, 60);
+                int maxSec = Math.Clamp(int.Parse(waitRangeMatch.Groups[2].Value), 1, 60);
+                if (maxSec < minSec) maxSec = minSec;
                 return new List<RecordedAction>
                 {
                     new()
                     {
                         ActionType = ActionType.Wait,
-                        Parameter = ms.ToString(),
-                        Name = $"等待 {ms}ms",
+                        Parameter = "",
+                        RandomWaitEnabled = true,
+                        RandomWaitMinSec = minSec,
+                        RandomWaitMaxSec = maxSec,
+                        Name = $"随机等待{minSec}~{maxSec}秒",
                         DelayMs = 0
                     }
                 };
+            }
+
+            // 等待N秒/毫秒（兼容旧格式，转为随机区间：N秒 → N~N*1.5秒，毫秒 → 固定毫秒）
+            var waitMatch = Regex.Match(command, @"等待\s*(\d+)\s*(秒|毫秒|ms|s)");
+            if (waitMatch.Success)
+            {
+                int value = int.Parse(waitMatch.Groups[1].Value);
+                string unit = waitMatch.Groups[2].Value;
+                if (unit is "秒" or "s")
+                {
+                    // 秒数转为随机区间：N → N~N*1.5秒
+                    int minSec = Math.Clamp(value, 1, 60);
+                    int maxSec = Math.Clamp((int)Math.Round(value * 1.5), minSec, 60);
+                    return new List<RecordedAction>
+                    {
+                        new()
+                        {
+                            ActionType = ActionType.Wait,
+                            Parameter = "",
+                            RandomWaitEnabled = true,
+                            RandomWaitMinSec = minSec,
+                            RandomWaitMaxSec = maxSec,
+                            Name = $"随机等待{minSec}~{maxSec}秒",
+                            DelayMs = 0
+                        }
+                    };
+                }
+                else
+                {
+                    // 毫秒保持旧模式
+                    return new List<RecordedAction>
+                    {
+                        new()
+                        {
+                            ActionType = ActionType.Wait,
+                            Parameter = value.ToString(),
+                            Name = $"等待 {value}ms",
+                            DelayMs = 0
+                        }
+                    };
+                }
             }
 
             // 按XX键

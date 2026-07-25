@@ -802,8 +802,23 @@ namespace WeChatAutomation.App
             if (ShowWindowTitle(action.ActionType))
                 propsPanel.Children.Add(MakeEditField("窗口标题:", action.WindowTitle ?? "", v => { action.WindowTitle = v; }, "留空=当前前台窗口"));
             // 参数
-            if (ShowParameter(action.ActionType))
+            if (ShowParameter(action.ActionType) && action.ActionType != ActionType.Wait)
                 propsPanel.Children.Add(MakeEditField("参数:", action.Parameter ?? "", v => { action.Parameter = v; }, multiline: true));
+            // ── 步骤后行为：随机等待 + 鼠标随机移动（所有步骤类型可用） ──
+            propsPanel.Children.Add(new Separator { Margin = new Thickness(0, 6, 0, 6) });
+            propsPanel.Children.Add(new TextBlock { Text = "步骤后行为:", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 3) });
+            var rwCheck = new CheckBox { Content = "步骤后随机等待", IsChecked = action.RandomWaitEnabled, Margin = new Thickness(0, 0, 0, 4) };
+            rwCheck.Checked += (_, _) => action.RandomWaitEnabled = true;
+            rwCheck.Unchecked += (_, _) => action.RandomWaitEnabled = false;
+            propsPanel.Children.Add(rwCheck);
+            propsPanel.Children.Add(MakeEditField("  开始秒数:", action.RandomWaitMinSec.ToString(), v => { if (int.TryParse(v, out int n)) action.RandomWaitMinSec = Math.Clamp(n, 1, 60); }, "1~60，默认3"));
+            propsPanel.Children.Add(MakeEditField("  结束秒数:", action.RandomWaitMaxSec.ToString(), v => { if (int.TryParse(v, out int n)) action.RandomWaitMaxSec = Math.Clamp(n, 1, 60); }, "1~60，默认16"));
+            var rmCheck = new CheckBox { Content = "步骤后鼠标随机移动", IsChecked = action.RandomMouseMoveEnabled, Margin = new Thickness(0, 4, 0, 4) };
+            rmCheck.Checked += (_, _) => action.RandomMouseMoveEnabled = true;
+            rmCheck.Unchecked += (_, _) => action.RandomMouseMoveEnabled = false;
+            propsPanel.Children.Add(rmCheck);
+            propsPanel.Children.Add(MakeEditField("  最小偏移(px):", action.RandomMoveMinOffset.ToString(), v => { if (int.TryParse(v, out int n)) action.RandomMoveMinOffset = Math.Max(n, 1); }, "默认30"));
+            propsPanel.Children.Add(MakeEditField("  最大偏移(px):", action.RandomMoveMaxOffset.ToString(), v => { if (int.TryParse(v, out int n)) action.RandomMoveMaxOffset = Math.Max(n, 1); }, "默认120"));
             // 滚动行数
             if (action.ActionType == ActionType.Scroll || action.ActionType == ActionType.ScrollRead)
                 propsPanel.Children.Add(MakeEditField("滚动行数:", action.ScrollAmount.ToString(), v => { if (int.TryParse(v, out int n)) action.ScrollAmount = n; }));
@@ -1156,9 +1171,14 @@ namespace WeChatAutomation.App
                     }
                 case "Wait":
                     {
-                        var ms = ShowInput("等待", "毫秒:", "1000");
-                        if (!int.TryParse(ms, out int v)) return null;
-                        newNode.ActionType = ActionType.Wait; newNode.Parameter = v.ToString(); newNode.Name = "等待" + v + "ms";
+                        var minStr = ShowInput("随机等待 - 开始秒数", "开始秒数 (1~60):", "3");
+                        if (!int.TryParse(minStr, out int minSec)) return null;
+                        minSec = Math.Clamp(minSec, 1, 60);
+                        var maxStr = ShowInput("随机等待 - 结束秒数", "结束秒数 (1~60):", "16");
+                        if (!int.TryParse(maxStr, out int maxSec)) return null;
+                        maxSec = Math.Clamp(maxSec, 1, 60);
+                        if (maxSec < minSec) maxSec = minSec;
+                        newNode.ActionType = ActionType.Wait; newNode.Parameter = ""; newNode.RandomWaitEnabled = true; newNode.RandomWaitMinSec = minSec; newNode.RandomWaitMaxSec = maxSec; newNode.Name = $"随机等待{minSec}~{maxSec}秒";
                         break;
                     }
                 case "Screenshot": newNode.ActionType = ActionType.Screenshot; newNode.Name = "截图"; break;
@@ -1792,13 +1812,13 @@ namespace WeChatAutomation.App
             return a.ActionType switch
             {
                 ActionType.Click => a.ClickMode == WeChatAutomation.Core.Recording.ClickMode.Vision
-                    ? $"视觉:{a.VisionLabel ?? "button"}"
+                    ? $"视觉:{a.VisionLabel ?? "button"} @({a.X:F0},{a.Y:F0})"
                     : a.ClickMode == WeChatAutomation.Core.Recording.ClickMode.UIAPath && !string.IsNullOrEmpty(a.XPath)
-                        ? a.ElementName ?? "未知"
-                        : a.X > 0 || a.Y > 0 ? $"@({a.X:F0},{a.Y:F0})" : "点击",
+                        ? $"{(string.IsNullOrEmpty(a.ElementName) ? "未知" : a.ElementName)} @({a.X:F0},{a.Y:F0})"
+                        : a.X > 0 || a.Y > 0 ? $"@({a.X:F0},{a.Y:F0}){(string.IsNullOrEmpty(a.WindowTitle) ? "" : $" 窗口:{a.WindowTitle}")}" : "点击",
                 ActionType.TypeText or ActionType.InsertText => !string.IsNullOrEmpty(a.Parameter) ? $"\"{a.Parameter}\"" : a.Name,
                 ActionType.SendKeys => !string.IsNullOrEmpty(a.Parameter) ? a.Parameter : "按键",
-                ActionType.Wait => !string.IsNullOrEmpty(a.Parameter) ? $"{a.Parameter}ms" : "等待",
+                ActionType.Wait => a.RandomWaitEnabled ? $"{a.RandomWaitMinSec}~{a.RandomWaitMaxSec}秒" : (!string.IsNullOrEmpty(a.Parameter) ? $"{a.Parameter}ms" : "等待"),
                 ActionType.Scroll => $"{a.ScrollAmount}行",
                 ActionType.ScrollRead => $"滚动{a.ScrollAmount}行{(!string.IsNullOrEmpty(a.OutputParamName) ? $" ->{{{a.OutputParamName}}}" : "")}",
                 ActionType.ReadContent => !string.IsNullOrEmpty(a.OutputParamName) ? $"->{a.OutputParamName}" : "阅读",

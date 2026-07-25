@@ -194,8 +194,34 @@ namespace WeChatAutomation.App
         // ═══ 新增步骤（任意可用） ═══
         private void AddWait_Click(object s, RoutedEventArgs e)
         {
-            var ms = ShowInput("等待", "毫秒:", "1000");
-            if (int.TryParse(ms, out int v)) AddOrRun(ActionType.Wait, v.ToString(), $"等待{v}ms");
+            // 单弹窗同时输入开始/结束秒数
+            var w = new Window { Title = "随机等待", Width = 320, Height = 180, WindowStartupLocation = WindowStartupLocation.CenterOwner, Owner = this };
+            var sp = new StackPanel { Margin = new Thickness(10) };
+            sp.Children.Add(new TextBlock { Text = "设置随机等待时间区间（秒）", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) });
+            var row1 = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
+            row1.Children.Add(new TextBlock { Text = "开始秒数:", VerticalAlignment = VerticalAlignment.Center, Width = 70 });
+            var minBox = new TextBox { Text = "3", Width = 80, ToolTip = "最小等待秒数 (1~60)" };
+            row1.Children.Add(minBox);
+            sp.Children.Add(row1);
+            var row2 = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
+            row2.Children.Add(new TextBlock { Text = "结束秒数:", VerticalAlignment = VerticalAlignment.Center, Width = 70 });
+            var maxBox = new TextBox { Text = "16", Width = 80, ToolTip = "最大等待秒数 (1~60)" };
+            row2.Children.Add(maxBox);
+            sp.Children.Add(row2);
+            sp.Children.Add(new TextBlock { Text = "回放时在 开始~结束 秒之间随机取值", FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 4) });
+            var bp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
+            var ok = new Button { Content = "确定", IsDefault = true, Padding = new Thickness(12, 4, 12, 4) };
+            var cancel = new Button { Content = "取消", IsCancel = true, Padding = new Thickness(12, 4, 12, 4), Margin = new Thickness(5, 0, 0, 0) };
+            bp.Children.Add(ok); bp.Children.Add(cancel); sp.Children.Add(bp);
+            w.Content = sp;
+            ok.Click += (_, _) => w.DialogResult = true;
+            if (w.ShowDialog() != true) return;
+            if (!int.TryParse(minBox.Text, out int minSec)) return;
+            if (!int.TryParse(maxBox.Text, out int maxSec)) return;
+            minSec = Math.Clamp(minSec, 1, 60);
+            maxSec = Math.Clamp(maxSec, 1, 60);
+            if (maxSec < minSec) maxSec = minSec;
+            AddOrRun(ActionType.Wait, parameter: "", name: $"随机等待{minSec}~{maxSec}秒", randomWaitMin: minSec, randomWaitMax: maxSec);
         }
         private void AddInsert_Click(object s, RoutedEventArgs e)
         {
@@ -539,7 +565,7 @@ namespace WeChatAutomation.App
             return string.Join("\n", texts.Where(t => !string.IsNullOrWhiteSpace(t)));
         }
 
-        private void AddOrRun(ActionType type, string parameter = "", string name = "", int delayMs = -1)
+        private void AddOrRun(ActionType type, string parameter = "", string name = "", int delayMs = -1, int randomWaitMin = 0, int randomWaitMax = 0)
         {
             RecordedAction node;
             if (type == ActionType.Click)
@@ -563,7 +589,10 @@ namespace WeChatAutomation.App
                     Name = name,
                     Parameter = parameter,
                     ParameterName = type == ActionType.InputParam ? parameter : null,
-                    DelayMs = delayMs >= 0 ? delayMs : 0
+                    DelayMs = delayMs >= 0 ? delayMs : 0,
+                    RandomWaitEnabled = randomWaitMin > 0 || randomWaitMax > 0,
+                    RandomWaitMinSec = randomWaitMin > 0 ? randomWaitMin : 3,
+                    RandomWaitMaxSec = randomWaitMax > 0 ? randomWaitMax : 16
                 };
             }
             InsertAfterSelected(node);
@@ -671,6 +700,46 @@ namespace WeChatAutomation.App
             var paramBox = new TextBox { Text = node.Parameter ?? "", TextWrapping = TextWrapping.Wrap, AcceptsReturn = true, MaxHeight = 80 };
             paramPanel.Children.Add(paramBox);
             sp.Children.Add(paramPanel);
+
+            // ── 步骤后行为：随机等待 + 鼠标随机移动（所有步骤类型可用） ──
+            sp.Children.Add(new Separator { Margin = new Thickness(0, 6, 0, 6) });
+            sp.Children.Add(new TextBlock { Text = "步骤后行为（模拟人类操作间隔）:", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
+
+            var randomWaitCheck = new CheckBox
+            {
+                Content = "步骤后随机等待",
+                IsChecked = node.RandomWaitEnabled,
+                Margin = new Thickness(0, 0, 0, 4),
+                ToolTip = "步骤执行完成后，在设定秒数区间内随机等待"
+            };
+            sp.Children.Add(randomWaitCheck);
+
+            var randomWaitRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(20, 0, 0, 8) };
+            randomWaitRow.Children.Add(new TextBlock { Text = "开始秒数:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var randomWaitMinBox = new TextBox { Text = node.RandomWaitMinSec.ToString(), Width = 50, ToolTip = "最小等待秒数 (1~60)" };
+            randomWaitRow.Children.Add(randomWaitMinBox);
+            randomWaitRow.Children.Add(new TextBlock { Text = "结束秒数:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 5, 0) });
+            var randomWaitMaxBox = new TextBox { Text = node.RandomWaitMaxSec.ToString(), Width = 50, ToolTip = "最大等待秒数 (1~60)" };
+            randomWaitRow.Children.Add(randomWaitMaxBox);
+            sp.Children.Add(randomWaitRow);
+
+            var randomMoveCheck = new CheckBox
+            {
+                Content = "步骤后鼠标随机移动",
+                IsChecked = node.RandomMouseMoveEnabled,
+                Margin = new Thickness(0, 0, 0, 4),
+                ToolTip = "步骤执行完成后，鼠标随机漂移到附近位置"
+            };
+            sp.Children.Add(randomMoveCheck);
+
+            var randomMoveRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(20, 0, 0, 8) };
+            randomMoveRow.Children.Add(new TextBlock { Text = "最小偏移(px):", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
+            var randomMoveMinBox = new TextBox { Text = node.RandomMoveMinOffset.ToString(), Width = 50, ToolTip = "鼠标随机移动最小偏移像素" };
+            randomMoveRow.Children.Add(randomMoveMinBox);
+            randomMoveRow.Children.Add(new TextBlock { Text = "最大偏移(px):", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 5, 0) });
+            var randomMoveMaxBox = new TextBox { Text = node.RandomMoveMaxOffset.ToString(), Width = 50, ToolTip = "鼠标随机移动最大偏移像素" };
+            randomMoveRow.Children.Add(randomMoveMaxBox);
+            sp.Children.Add(randomMoveRow);
 
             // 滚动行数（Scroll/ScrollRead）
             var scrollPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
@@ -826,7 +895,7 @@ namespace WeChatAutomation.App
                 bool isClick = t == ActionType.Click;
                 winTitlePanel.Visibility = (isClick || t == ActionType.ReadContent || t == ActionType.ScrollRead
                     || t == ActionType.RegexMatch || t == ActionType.SwitchToWindow) ? Visibility.Visible : Visibility.Collapsed;
-                paramPanel.Visibility = (t == ActionType.TypeText || t == ActionType.SendKeys || t == ActionType.Wait
+                paramPanel.Visibility = (t == ActionType.TypeText || t == ActionType.SendKeys
                     || t == ActionType.InsertText || t == ActionType.OpenApp || t == ActionType.WaitForApp) ? Visibility.Visible : Visibility.Collapsed;
                 scrollPanel.Visibility = (t == ActionType.Scroll || t == ActionType.ScrollRead) ? Visibility.Visible : Visibility.Collapsed;
                 outputVarPanel.Visibility = (isClick || t == ActionType.ReadContent || t == ActionType.ScrollRead || t == ActionType.RegexMatch) ? Visibility.Visible : Visibility.Collapsed;
@@ -877,6 +946,13 @@ namespace WeChatAutomation.App
                 node.DisplayName = string.IsNullOrWhiteSpace(nameBox.Text) ? null : nameBox.Text.Trim();
                 node.WindowTitle = windowTitleBox.Text.Trim();
                 node.Parameter = paramBox.Text;
+                // 步骤后行为：随机等待 + 鼠标移动
+                node.RandomWaitEnabled = randomWaitCheck.IsChecked == true;
+                if (int.TryParse(randomWaitMinBox.Text, out int rwmin)) node.RandomWaitMinSec = Math.Clamp(rwmin, 1, 60);
+                if (int.TryParse(randomWaitMaxBox.Text, out int rwmax)) node.RandomWaitMaxSec = Math.Clamp(rwmax, 1, 60);
+                node.RandomMouseMoveEnabled = randomMoveCheck.IsChecked == true;
+                if (int.TryParse(randomMoveMinBox.Text, out int rmmin)) node.RandomMoveMinOffset = Math.Max(rmmin, 1);
+                if (int.TryParse(randomMoveMaxBox.Text, out int rmmax)) node.RandomMoveMaxOffset = Math.Max(rmmax, 1);
                 if (int.TryParse(delayBox.Text, out int d)) node.DelayMs = d;
                 if (int.TryParse(scrollBox.Text, out int sa)) node.ScrollAmount = sa;
                 if (double.TryParse(xBox.Text, out double x)) node.X = x;

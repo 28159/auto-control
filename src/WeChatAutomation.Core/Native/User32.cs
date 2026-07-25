@@ -114,6 +114,11 @@ namespace WeChatAutomation.Core.Native
         [DllImport("user32.dll")]
         public static extern bool GetCursorPos(out POINT lpPoint);
 
+        [DllImport("user32.dll")]
+        public static extern int GetSystemMetrics(int nIndex);
+        public const int SM_CXSCREEN = 0;
+        public const int SM_CYSCREEN = 1;
+
         public const int INPUT_MOUSE = 0;
         public const int INPUT_KEYBOARD = 1;
 

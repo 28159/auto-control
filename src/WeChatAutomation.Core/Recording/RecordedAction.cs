@@ -104,6 +104,22 @@ namespace WeChatAutomation.Core.Recording
         public int DelayMs { get; set; } = 300;
         public int ScrollAmount { get; set; } = 3; // 滚动行数
 
+        // ── 步骤后随机等待（所有步骤类型可用） ──
+        /// <summary>步骤执行完成后是否随机等待。默认 false。</summary>
+        public bool RandomWaitEnabled { get; set; }
+        /// <summary>随机等待最小秒数。默认 3。范围 1~60。</summary>
+        public int RandomWaitMinSec { get; set; } = 3;
+        /// <summary>随机等待最大秒数。默认 16。范围 1~60。</summary>
+        public int RandomWaitMaxSec { get; set; } = 16;
+
+        // ── 步骤后鼠标随机移动（所有步骤类型可用） ──
+        /// <summary>步骤执行完成后是否随机移动鼠标。默认 false。</summary>
+        public bool RandomMouseMoveEnabled { get; set; }
+        /// <summary>鼠标随机移动偏移像素范围（最小）。默认 30。</summary>
+        public int RandomMoveMinOffset { get; set; } = 30;
+        /// <summary>鼠标随机移动偏移像素范围（最大）。默认 120。</summary>
+        public int RandomMoveMaxOffset { get; set; } = 120;
+
         // 动态输入参数
         public string? ParameterName { get; set; }
         public string? DefaultValue { get; set; }
@@ -182,21 +198,23 @@ namespace WeChatAutomation.Core.Recording
         public string Summary => ActionType switch
         {
             ActionType.Click => ClickMode == ClickMode.Coordinate
-                ? $"点击坐标({X:F0},{Y:F0})"
+                ? $"坐标({X:F0},{Y:F0}){(string.IsNullOrEmpty(WindowTitle) ? "" : $" 窗口:{Trunc(WindowTitle, 15)}")}"
                 : ClickMode == ClickMode.Vision
-                    ? $"视觉点击 {VisionLabel ?? "模板"}{(string.IsNullOrEmpty(TemplateImage) ? "(无模板)" : "")}"
+                    ? $"视觉 {VisionLabel ?? "模板"}{(string.IsNullOrEmpty(TemplateImage) ? "(无模板)" : "")} @({X:F0},{Y:F0})"
                     : !string.IsNullOrEmpty(XPath)
-                        ? $"路径点击 {Trunc(XPath, 40)}"
-                        : $"点击路径 {ElementName ?? ClassName ?? AutomationId ?? "未知"}",
-            ActionType.TypeText => $"输入 \"{Trunc(Parameter, 20)}\"",
+                        ? $"{Trunc(XPath, 50)}{(string.IsNullOrEmpty(ElementName) ? "" : $" [{ElementName}]")} @({X:F0},{Y:F0})"
+                        : $"{ElementName ?? ClassName ?? AutomationId ?? "未知"}{(string.IsNullOrEmpty(ControlType) ? "" : $" <{ControlType}>")} @({X:F0},{Y:F0})",
+            ActionType.TypeText => $"输入 \"{Trunc(Parameter, 30)}\"",
             ActionType.SendKeys => $"按键 {Parameter}",
-            ActionType.Wait => $"等待 {Parameter}ms",
+            ActionType.Wait => RandomWaitEnabled
+                ? $"随机等待 {RandomWaitMinSec}~{RandomWaitMaxSec}秒"
+                : $"等待 {Parameter}ms",
             ActionType.Copy => "复制 (Ctrl+C)",
             ActionType.Paste => "粘贴 (Ctrl+V)",
-            ActionType.InsertText => $"插入 \"{Trunc(Parameter, 20)}\"",
+            ActionType.InsertText => $"插入 \"{Trunc(Parameter, 30)}\"",
             ActionType.Screenshot => "截图",
-            ActionType.OpenApp => $"打开 {Trunc(Parameter, 30)}",
-            ActionType.WaitForApp => $"等待应用 {Trunc(Parameter, 20)} ({DelayMs}ms超时)",
+            ActionType.OpenApp => $"打开 {Trunc(Parameter, 40)}",
+            ActionType.WaitForApp => $"等待应用 {Trunc(Parameter, 25)} ({DelayMs}ms超时)",
             ActionType.Scroll => $"滚动 {ScrollAmount} 行",
             ActionType.ReadContent => "阅读窗口内容" + (!string.IsNullOrEmpty(OutputParamName) ? $" ->{{{OutputParamName}}}" : ""),
             ActionType.ScrollRead => $"滚动阅读 {ScrollAmount} 行" + (!string.IsNullOrEmpty(OutputParamName) ? $" ->{{{OutputParamName}}}" : ""),
